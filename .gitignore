@@ -1,2 +1,6 @@
 data/
 entorno/
+.venv/
+runs/
+__pycache__/
+*.pyc

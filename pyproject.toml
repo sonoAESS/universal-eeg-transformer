@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "universal-eeg-transformer"
+version = "2.0.0"
+description = "Transformación universal de referencias de EEG: lead field analítico multicapa, REST (Yao, 2001) y autoencoder lineal All-to-All."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "AESS" }]
+dependencies = [
+    "mne>=1.12",
+    "numpy>=2.4",
+    "scipy>=1.18",
+    "pandas>=3.0",
+    "scikit-learn>=1.9",
+    "matplotlib>=3.11",
+    "tensorflow>=2.21",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ipython>=9.0",
+    "jupyter>=1.0",
+]
+
+[project.scripts]
+eeg-transform = "eeg_transform.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eeg_transform"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
