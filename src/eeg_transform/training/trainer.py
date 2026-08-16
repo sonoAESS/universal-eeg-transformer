@@ -1,0 +1,139 @@
+"""Entrenamiento del transformador universal (lotes sobre referencias alineadas)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import tensorflow as tf
+
+from ..config import EEGTransformConfig, REFERENCE_KINDS
+from ..data.dataset import MultiReferenceDataset
+from ..logging_conf import get_logger
+from ..models.universal_transformer import UniversalEEGTransformer
+
+log = get_logger(__name__)
+
+
+def build_tf_dataset(
+    ds: MultiReferenceDataset,
+    split: str,
+    batch_size: int,
+    shuffle: bool = False,
+    seed: int = 42,
+    buffer: int = 20_000,
+    prefetch: int = 4,
+    dtype: str = "float32",
+) -> tf.data.Dataset:
+    """Dataset de TF con los 4 montajes alineados como tupla de tensores."""
+    arrays = tuple(
+        ds.refs[k][ds.split_idx[split]].astype(dtype) for k in REFERENCE_KINDS
+    )
+    dset = tf.data.Dataset.from_tensor_slices(arrays)
+    if shuffle:
+        dset = dset.shuffle(min(buffer, arrays[0].shape[0]), seed=seed,
+                            reshuffle_each_iteration=True)
+    dset = dset.repeat()
+    return dset.batch(batch_size, drop_remainder=False).prefetch(prefetch)
+
+
+def build_model(cfg: EEGTransformConfig, n_channels: int) -> UniversalEEGTransformer:
+    """Instancia el modelo según la configuración."""
+    model_cfg = cfg.model
+    if model_cfg.latent_dim in (0, -1):
+        model_cfg.latent_dim = n_channels
+    return UniversalEEGTransformer(n_channels=n_channels, model_cfg=model_cfg)
+
+
+def train(
+    ds: MultiReferenceDataset,
+    cfg: EEGTransformConfig,
+    force: bool = False,
+) -> tuple[UniversalEEGTransformer, Any]:
+    """Entrena el transformador universal sobre el dataset multi-referencia."""
+    tcfg = cfg.training
+    run_dir = Path(tcfg.run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    checkpoint = run_dir / "best.weights.h5"
+    history_csv = run_dir / "history.csv"
+    if checkpoint.exists() and not force:
+        log.info("Checkpoint previo detectado (%s) — reutilizando.", checkpoint)
+    elif history_csv.exists():
+        # Un reentrenamiento con --force debe partir de un log limpio (evita
+        # concatenar épocas de corridas distintas en un mismo CSV).
+        history_csv.unlink()
+
+    tf.random.set_seed(tcfg.seed)
+    np.random.seed(tcfg.seed)
+
+    n = max(1, ds.n_channels)
+    model = build_model(cfg, n)
+
+    # Pre-entrenamiento lineal: factorización empírica óptima de las rutas.
+    # Sitúa las matrices efectivas cerca de las analíticas desde la época 0,
+    # evitando que el gradiente quede atrapado en cuencas degeneradas del
+    # autoencoder lineal (las rutas son exactamente lineales por construcción).
+    if model.latent_dim == n:
+        init_n = 20_000
+        init_idx = ds.split_idx["train"][:init_n]
+        init_refs = {k: ds.refs[k][init_idx] for k in REFERENCE_KINDS}
+        model.init_from_data(init_refs)
+        log.info("Inicialización lineal empírica desde %d muestras.", len(init_idx))
+
+    model.compile(
+        optimizer=tf.keras.optimizers.get(
+            {"class_name": cfg.model.optimizer,
+             "config": {"learning_rate": cfg.model.learning_rate}}
+        )
+    )
+
+    train_ds = build_tf_dataset(
+        ds, "train", tcfg.batch_size, shuffle=True, seed=tcfg.seed,
+        buffer=tcfg.shuffle_buffer, prefetch=tcfg.prefetch, dtype=cfg.dataset.dtype,
+    )
+    val_ds = build_tf_dataset(
+        ds, "val", tcfg.batch_size, shuffle=False, prefetch=tcfg.prefetch,
+        dtype=cfg.dataset.dtype,
+    )
+
+    steps_per_epoch = max(1, len(ds.split_idx["train"]) // tcfg.batch_size)
+    validation_steps = max(1, len(ds.split_idx["val"]) // tcfg.batch_size)
+
+    callbacks = [
+        tf.keras.callbacks.ModelCheckpoint(
+            str(checkpoint), monitor="val_loss_estandarizada",
+            save_best_only=tcfg.save_best_only, save_weights_only=True, mode="min",
+            verbose=0,
+        ),
+        tf.keras.callbacks.EarlyStopping(
+            monitor="val_loss_estandarizada", patience=tcfg.early_stop_patience,
+            restore_best_weights=True, mode="min",
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss_estandarizada", factor=tcfg.reduce_lr_factor,
+            patience=tcfg.reduce_lr_patience, min_lr=tcfg.min_lr, mode="min",
+            verbose=0,
+        ),
+        tf.keras.callbacks.CSVLogger(str(run_dir / "history.csv"),
+                                      append=False),
+    ]
+
+    log.info("Entrenando %s épocas (batch=%d)...", tcfg.epochs, tcfg.batch_size)
+    history = model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=tcfg.epochs,
+        steps_per_epoch=steps_per_epoch,
+        validation_steps=validation_steps,
+        callbacks=callbacks,
+        verbose=1,
+    )
+
+    # model.load_weights(checkpoint)  # restore_best_weights ya lo hace
+    model.load_weights(str(checkpoint))
+    model.save(run_dir / "model.keras")
+    log.info("Modelo guardado en %s", run_dir / "model.keras")
+    return model, history
