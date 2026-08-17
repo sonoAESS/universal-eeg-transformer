@@ -12,16 +12,36 @@ Autoencoder **lineal** multicabezal *All-to-All* que unifica la conversión entr
 * **Pérdida:** MSE estandarizado con Z-score del objetivo por lote para equilibrar las 16 rutas independientemente de su escala.
 * **Inicialización lineal empírica:** antes de entrenar, `W^enc_s = ridge(X_s→z)` y `W^dec_d = ridge(z→X_d)` con `z = X_unipolar` (latente de dimensión `C`), calculadas sobre una submuestra de entrenamiento. Como las referencias provienen de la misma señal por operadores lineales, esta factorización deja cada ruta en `var_expl ≈ 1` desde la época 0; sin ella el gradiente queda atrapado en cuencas degeneradas del autoencoder lineal (producto Glorot) y el modelo colapsa a predecir la media (`r ≈ 0`).
 
-## Resultados (sujetos 1–4 de eegbci, split `block`)
+## Resultados (sujetos 1–12 de eegbci, split `block`)
 
-Métricas de test tras el ajuste fino (latente = 64, 16 rutas, pérdida Z-score):
+Métricas de test tras el ajuste fino (latente = C = 64, 16 rutas, pérdida
+Z-score). Detalle completo y comparativa: `docs/results_comparison.md`.
 
-| Bloque | MSE (V²) | RMSE (V) | r |
-|---|---|---|---|
-| Auto-reconstrucción (diagonal) | 1.1e-12 | 6.7e-7 | 0.9999 |
-| Transformación cruzada | 9.9e-13 | 8.0e-7 | 0.9987 |
+| Variante | RMSE diag. (µV) | RMSE cross (µV) | r cross | error comp. medio | error comp. máx |
+|---|---|---|---|---|---|
+| **projected** (recomendado) | **0.26** | **0.28** | **1.0000** | 0.034 | 0.190 |
+| free (por defecto) | 0.69 | 0.66 | 0.9997 | 0.067 | 0.363 |
+| soft_group | 0.35 | 0.92 | 0.9990 | **0.005** | **0.040** |
+| group (estructura exacta) | 133.4 | 133.5 | 0.709 | 0.000 | 0.000 |
+| analítico `T_d pinv(T_s)` | 133.4 | 134.2 | 0.735 | 0.593 | 8.563 |
 
-Todas las rutas superan `r ≥ 0.99` (la más baja es `rest→bipolar`, `r ≈ 0.99`). REST (~1–2 µV RMSE) era el montaje dominante por amplitud (referencia al infinito); el resto ronda los 0.1–0.3 µV RMSE.
+Conclusiones:
+
+* **`projected`** da la mejor precisión (RMSE cruzado ~0.28 µV, `r_cross ≈ 1`)
+  y respeta la física (anula por construcción el modo constante).
+* **`soft_group`** impone la transitividad `s→d→u` como penalización suave y
+  logra un error de composición ~120× menor que el encadenado analítico a
+  cambio de un RMSE cruzado de ~0.9 µV.
+* **`group`** (composición exacta) y el encadenado analítico fallan igual:
+  ~133 µV RMSE. La pseudo-inversa rígida asume que todas las referencias
+  comparten el mismo subespacio observable, y el de REST no coincide con el
+  de uni/bip/CAR.
+* El latente óptimo es `C`: `wide` (128) y `bottleneck` (32) empeoran.
+* `error_fro_rel` ~1 en rutas REST en todos los modelos no implica mala
+  predicción: la matriz REST analítica no es identificable únicamente desde
+  el dato, y el modelo aprende un mapeo datos-equivalente.
+* Más datos (12 vs 4 sujetos) refinaron los mapas: `free` sube `r_cross` de
+  0.9987 a 0.9997 y `rest→bipolar` de `r ≈ 0.99` a 0.9977.
 
 > Nota sobre `error_fro_rel`: se compara en el **subespacio observable** (`P = I − 11ᵀ/C` por ambos lados) porque el modo constante instantáneo no es recuperable desde ninguna referencia; sin ese centrado la métrica no refleja la calidad real del mapeo.
 
@@ -45,14 +65,20 @@ La fuente de verdad de dependencias es `pyproject.toml` (ya no se usa `requireme
 
 ## Uso
 
-La CLI (`eeg-transform`) tiene tres comandos; `--config` alude a un YAML (ver `config/default.yaml`):
+La CLI (`eeg-transform`) tiene cuatro comandos; `--config` alude a un YAML (ver `config/default.yaml`):
 
 ```bash
-eeg-transform -c config/smoke.yaml build      # descarga PhysioNet eegbci y cachea dataset + lead field
-eeg-transform -c config/smoke.yaml train      # entrena el transformador lineal
-eeg-transform -c config/smoke.yaml eval       # métricas de test y figuras
-eeg-transform -c config/smoke.yaml pipeline   # build + train + eval
+eeg-transform -c config/smoke.yaml build        # descarga PhysioNet eegbci y cachea dataset + lead field
+eeg-transform -c config/smoke.yaml train        # entrena el transformador lineal
+eeg-transform -c config/smoke.yaml eval         # métricas de test y figuras
+eeg-transform -c config/*.yaml pipeline         # build + train + eval
+eeg-transform compare runs/projected runs/soft_group runs/wide   # tabla comparativa de ejecuciones
 ```
+
+Variantes disponibles en `config/` (vía `model.variant`): `default.yaml`
+(`free`), `group.yaml`, `projected.yaml`, `soft_group.yaml`, y exploraciones
+de latente `wide.yaml` (128) / `bottleneck.yaml` (32). Resultados:
+`docs/results_comparison.md`.
 
 * `build`: descarga los sujetos/corridas indicados, filtra (bandpass y notch), marca artefactos y canales malos por MAD z-score, revisa la referencia del dato original (`original_reference`) y construye las 4 referencias alineadas (unipolar, bipolar, CAR, REST), guardando `data/processed/dataset_{mode}_{subjects}.npz` y `*_leadfield.npz`. Splits por bloques temporales (`block`) o por sujeto (`subject`).
 * `train`: escribe checkpoints en `runs/<nombre>/` (`best.weights.h5`, `model.keras`, `history.csv`).
@@ -63,7 +89,10 @@ eeg-transform -c config/smoke.yaml pipeline   # build + train + eval
 ```text
 ├── pyproject.toml               # dependencias (uv/pip instal ")
 ├── uv.lock
-├── config/default.yaml          # configuración por defecto
+├── config/default.yaml          # configuración por defecto (variante free)
+├── docs/
+│   ├── model_variants.md        # descripción de las variantes de arquitectura
+│   └── results_comparison.md    # tabla comparativa y análisis (sujetos 1–12)
 ├── src/eeg_transform/
 │   ├── config.py                # dataclasses + carga/validación YAML
 │   ├── references.py            # matrices de referencia + REST

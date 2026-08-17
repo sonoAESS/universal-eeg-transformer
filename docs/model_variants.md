@@ -15,6 +15,7 @@ varianza explicada cerca de 1 en las 16 rutas.
 | `free`       | 8 matrices `C×C` (enc + dec por montaje) | ninguna adicional              |
 | `group`      | 4 matrices `C×C` (enc) + pseudo-inversas fijas | grupo exacto (ver abajo) |
 | `projected`  | 8 matrices `C×C` centradas (`W = P W_raw`) | anulación del modo constante |
+| `soft_group` | 8 matrices `C×C` + penalización de composición en la pérdida | grupo suave (ver abajo) |
 
 ## Proyección de observables
 
@@ -57,6 +58,29 @@ consistentemente definida debería cumplir.
 mismo subespacio observable; el modelo no puede representar un mapa con
 rango completo (que no tendría sentido físico de todos modos).
 
+> **Hallazgo empírico (12 sujetos):** esta rigidez es también su talón de
+> Aquiles. El rowspace de REST (lead field a infinito) no coincide con el de
+> uni/bip/CAR, y al forzar la pseudo-inversa la inicialización empírica ya
+> incurre en `error_fro_rel` > 14 en rutas con REST. En test la variante
+> `group` no converge (RMSE cross ~133 µV, `r ≈ 0.71`), el mismo fracaso que
+> el encadenado analítico `T_d pinv(T_s)`. La consistencia de composición es
+> exacta (0.000), pero sobre un subespacio equivocado.
+
+## Variante `soft_group`: grupo suave por regularización
+
+Arquitectura libre (8 matrices) pero la pérdida total suma una
+**penalización de composición** cada lote:
+
+```
+loss_total = loss_rutas + w · ⟨||P(A_{s→d}A_{d→u} − A_{s→u})P||F / ||P A_{s→u} P||F⟩_{s,d,u}
+```
+
+Con `w = 0.5` (config `soft_group.yaml`) el modelo aprende a componer casi
+de forma exacta sin la pseudo-inversa rígida: en test `comp_medio = 0.005`
+(~14× mejor que `free`, ~120× mejor que el encadenado analítico) con RMSE
+cruzado de solo ~0.9 µV — degrada menos de 0.3 µV frente a `free`. Es el
+equilibrio recomendado si la transitividad importa.
+
 ## Variante `projected`: anulación del modo constante por construcción
 
 Toda matriz aprendida se parametriza como `W_eff = P W_raw`. Como `1ᵀP = 0`,
@@ -67,7 +91,7 @@ cada ruta, dejando el resto del aprendizaje libre (8 matrices).
 
 ## Inicialización por variante
 
-* `free` / `projected`: `W_enc^s = ridge(X_s → U)`, `W_dec^d = ridge(U → X_d)`.
+* `free` / `projected` / `soft_group`: `W_enc^s = ridge(X_s → U)`, `W_dec^d = ridge(U → X_d)`.
 * `group`: solo `W_enc^s = ridge(X_s → U)`; los decoders se derivan.
 
 `init_from_data` exige `latent_dim == C`.
@@ -79,6 +103,7 @@ guarda `consistency.csv` con la tabla de error de composición
 `||P(A_{s→d} A_{d→u} − A_{s→u})P||ₓ / ||P A_{s→u} P||ₓ`:
 
 * `group`: 0 exacto.
+* `soft_group`: ~0.005 (penalizado en la pérdida).
 * `free`/`projected`: cercano a 0 si la data es suficientemente informativa
   (el modelo aprende a componer bien), sin estar garantizado.
-* línea base analítica `T_d pinv(T_s)`: ~1 (no es un grupo).
+* línea base analítica `T_d pinv(T_s)`: ~0.6 de media (no es un grupo).
