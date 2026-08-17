@@ -82,7 +82,7 @@ class DatasetConfig:
 #                    (transitividad y auto-reconstrucción = proyector).
 #   * ``projected``: todas las matrices aprendidas anulan por construcción el
 #                    modo constante (físicamente válidas como referencias).
-MODEL_VARIANTS: tuple[str, ...] = ("free", "group", "projected")
+MODEL_VARIANTS: tuple[str, ...] = ("free", "group", "projected", "soft_group")
 
 
 @dataclass
@@ -95,6 +95,9 @@ class ModelConfig:
     optimizer: str = "adam"
     learning_rate: float = 1e-3
     variant: str = "free"
+    # Peso de la penalización de consistencia de composición (soft_group):
+    # termina la física de grupo como pérdida suave en lugar de estructura.
+    comp_penalty_weight: float = 0.0
 
 
 @dataclass
@@ -198,6 +201,8 @@ class EEGTransformConfig:
                 "variant='group' requiere latent_dim 0/auto (debe igualar "
                 "n_canales para pseudo-invertir)."
             )
+        if self.model.variant == "soft_group" and not (0.0 <= self.model.comp_penalty_weight <= 10.0):
+            raise ValueError("soft_group requiere comp_penalty_weight en (0, 10].")
         if len(self.leadfield.rel_radii) != len(self.leadfield.sigmas):
             raise ValueError(
                 "rel_radii y sigmas deben tener la misma longitud (capas concéntricas)."

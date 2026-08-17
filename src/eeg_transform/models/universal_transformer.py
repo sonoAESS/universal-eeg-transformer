@@ -41,6 +41,14 @@ Variantes de arquitectura (``model.variant``):
     I - 11^T/C``; por construcción toda salida anula el modo constante
     instantáneo (todas las rutas son "referencias válidas", no pueden
     introducir un DC espurio).
+
+* ``soft_group``
+    Arquitectura libre (8 matrices) con una **penalización suave** de la
+    consistencia de composición en la pérdida: cada lote suma
+    ``w * <error de composición>`` a la pérdida total. Interpola entre
+    ``free`` (sin restricción) y ``group`` (estructura exacta): obliga a
+    componer bien ``A_{s->d} A_{d->u} ≈ A_{s->u}`` sin imponer la
+    pseudo-inversa rígida que degrada la convergencia de ``group``.
 """
 
 from __future__ import annotations
@@ -64,6 +72,7 @@ INITIALIZER_SEED = 42
 VARIANT_FREE = "free"
 VARIANT_GROUP = "group"
 VARIANT_PROJECTED = "projected"
+VARIANT_SOFT_GROUP = "soft_group"
 
 
 class _CenteredDense(layers.Layer):
@@ -319,6 +328,44 @@ class UniversalEEGTransformer(tf.keras.Model):
             return layer._effective(w)
         return w
 
+    def _transfer_matrices_tf(self) -> Dict[Tuple[str, str], tf.Tensor]:
+        """Matrices efectivas ``A_{s->d}`` como tensores (variante ``group`` no
+        es diferenciable de forma estable a través de ``pinv``; se excluye)."""
+        enc = {k: self._effective_kernel_tf(self.encoders[k]) for k in self.kinds}
+        dec = {k: self._effective_kernel_tf(self.decoders[k]) for k in self.kinds}
+        return {
+            (s, d): tf.matmul(enc[s], dec[d])
+            for s in self.kinds for d in self.kinds
+        }
+
+    def _soft_group_penalty(self) -> tf.Tensor:
+        """Penalización suave de composición ``s->d->u`` en TF.
+
+        Suma las normas relativas ``||P(A_{s->d} A_{d->u} - A_{s->u})P||_F /
+        ||P A_{s->u} P||_F`` sobre todos los tripletes. Alcanza 0 si el
+        modelo aprende la estructura de grupo de forma exacta.
+        """
+        C = self.n_channels
+        p = tf.constant(
+            np.eye(C, dtype=np.float32) - np.ones((C, C), dtype=np.float32) / C,
+            dtype=tf.float32,
+        )
+        mats = self._transfer_matrices_tf()
+        p_mats = {key: tf.matmul(tf.matmul(p, m), p) for key, m in mats.items()}
+
+        def _fro(m: tf.Tensor) -> tf.Tensor:
+            return tf.sqrt(tf.reduce_sum(tf.square(m)))
+
+        terms = []
+        for s in self.kinds:
+            for d in self.kinds:
+                for u in self.kinds:
+                    lhs = tf.matmul(p_mats[(s, d)], p_mats[(d, u)])
+                    rhs = p_mats[(s, u)]
+                    denom = _fro(rhs) + 1e-8
+                    terms.append(_fro(lhs - rhs) / denom)
+        return tf.reduce_sum(terms) / (len(self.kinds) ** 3)
+
     def call(self, inputs, source: str | None = None, **kwargs):
         """Predicción universal.
 
@@ -438,7 +485,10 @@ class UniversalEEGTransformer(tf.keras.Model):
             total = tf.reduce_sum(
                 tf.stack([tf.stack(list(r.values())) for r in route_losses.values()])
             )
-            total = total + tf.add_n(self.losses)  # regularizaciones L2
+            if self.variant == VARIANT_SOFT_GROUP:
+                total = total + self.model_cfg.comp_penalty_weight * self._soft_group_penalty()
+            if self.losses:
+                total = total + tf.add_n(self.losses)  # regularizaciones L2
 
         grads = tape.gradient(total, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
@@ -457,6 +507,8 @@ class UniversalEEGTransformer(tf.keras.Model):
         total = tf.reduce_sum(
             tf.stack([tf.stack(list(r.values())) for r in route_losses.values()])
         )
+        if self.variant == VARIANT_SOFT_GROUP:
+            total = total + self.model_cfg.comp_penalty_weight * self._soft_group_penalty()
         self.loss_tracker.update_state(total / (len(self.kinds) ** 2))
         self.mse_tracker.update_state(self._real_mse(refs))
         return {

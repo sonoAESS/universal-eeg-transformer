@@ -119,8 +119,11 @@ def cmd_compare(runs: list[str]) -> None:
         off = m[m["origen"] != m["destino"]]
         conf = run / "config.yaml"
         variant = "?"
+        latent = None
         try:
-            variant = load_config(conf).model.variant
+            c = load_config(conf)
+            variant = c.model.variant
+            latent = c.model.latent_dim
         except Exception:
             pass
         best_val = None
@@ -131,13 +134,23 @@ def cmd_compare(runs: list[str]) -> None:
             if col:
                 best_val = float(h[col[0]].min())
                 n_epochs = int(len(h))
+        comp_mean = None
+        comp_max = None
+        cons_csv = run / "consistency.csv"
+        if cons_csv.exists():
+            cons = pd.read_csv(cons_csv)
+            comp_mean = float(cons["comp_medio"].mean())
+            comp_max = float(cons["comp_max"].max())
         rows.append({
             "run": name,
             "variant": variant,
+            "latent": latent,
             "rmse_diag_uV": float(diag["rmse"].mean()) * 1e6,
             "r_diag": float(diag["r"].mean()),
             "rmse_cross_uV": float(off["rmse"].mean()) * 1e6,
             "r_cross": float(off["r"].mean()),
+            "comp_medio": comp_mean,
+            "comp_max": comp_max,
             "val_loss_best": best_val,
             "epochs": n_epochs,
         })

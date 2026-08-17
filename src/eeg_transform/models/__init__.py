@@ -2,6 +2,7 @@ from .universal_transformer import (
     VARIANT_FREE,
     VARIANT_GROUP,
     VARIANT_PROJECTED,
+    VARIANT_SOFT_GROUP,
     UniversalEEGTransformer,
 )
 
@@ -10,4 +11,5 @@ __all__ = [
     "VARIANT_FREE",
     "VARIANT_GROUP",
     "VARIANT_PROJECTED",
+    "VARIANT_SOFT_GROUP",
 ]

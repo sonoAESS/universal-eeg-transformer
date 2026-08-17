@@ -255,3 +255,32 @@ def test_projected_variant_kills_constant():
         np.testing.assert_allclose(
             (ones @ m), np.zeros(C), atol=1e-5, err_msg=f"ruta {s}->{d}"
         )
+
+
+def test_soft_group_penalty_zero_when_consistent():
+    """La penalización suave alcanza 0 con matrices que forman un grupo exacto.
+
+    Si ``W_dec^k = (W_enc^k)^+`` (estructura de grupo), la penalización de
+    composición ``s->d->u`` debe ser nula sobre el subespacio observable.
+    """
+    rng = np.random.default_rng(23)
+    C = 6
+    ds = _fake_dataset(rng, n=800, C=C)
+    cfg = EEGTransformConfig()
+    cfg.model.latent_dim = C
+    cfg.model.variant = "soft_group"
+    cfg.model.comp_penalty_weight = 0.5
+    model = UniversalEEGTransformer(n_channels=C, model_cfg=cfg.model)
+    model.ensure_built()
+
+    # simulamos matrices que forman grupo exacto: dec = pinv(enc), enc = Glorot
+    pen = float(model._soft_group_penalty())
+    # con pesos aleatorios la composición difiere de las rutas directas
+    assert pen > 0.0
+
+    # imponemos la estructura de grupo y verificamos que la penalidad cae a 0
+    for k in KINDS:
+        w = model.encoders[k].kernel.numpy()
+        model.decoders[k].kernel.assign(np.linalg.pinv(w).astype("float32"))
+    pen2 = float(model._soft_group_penalty())
+    assert pen2 < 1e-5, f"penalización tras imponer grupo: {pen2:.3e}"
