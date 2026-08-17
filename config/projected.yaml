@@ -1,7 +1,10 @@
-# Universal EEG Transformer — configuración por defecto
-# Rutas, física del lead field y entrenamiento.
+# Universal EEG Transformer — variante 'projected'
+# Todas las matrices aprendidas (encoders y decoders) se parametrizan como
+# W = P W_raw (P = I - 11^T/C): por construcción anulan el modo constante
+# instantáneo. La red no puede emitir un DC espurio ni componer referencias
+# inválidas; lo que respeta la física de adquisición en cada ruta.
 
-out_dir: runs/default
+out_dir: runs/projected
 
 data:
   subjects: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
@@ -9,16 +12,15 @@ data:
   bandpass: [1.0, 45.0]
   notch: []
   unipolar_ref_ch: "Cz"
-  original_reference: "left_mastoid"   # eegbci graba contra la mastoides izquierda
+  original_reference: "left_mastoid"
   artifact_z_thresh: 6.0
   bad_channel_z_thresh: 4.0
   n_jobs: 1
 
 leadfield:
   head_radius: 0.09
-  # cerebro / CSF / cráneo / piel (radios relativos al radio de la cabeza)
   rel_radii: [0.87, 0.9, 0.97, 1.0]
-  sigmas: [0.33, 1.0, 0.0042, 0.33]   # S/m
+  sigmas: [0.33, 1.0, 0.0042, 0.33]
   brain_radius: 0.078
   src_grid_mm: 10.0
 
@@ -32,12 +34,12 @@ dataset:
   dtype: float32
 
 model:
-  latent_dim: 0        # 0 = igual al número de canales
+  latent_dim: 0
   use_bias: false
   kernel_regularizer_l2: 1.0e-6
   optimizer: adam
   learning_rate: 1.0e-3
-  variant: free        # free | group | projected
+  variant: projected
 
 training:
   epochs: 60
@@ -48,8 +50,8 @@ training:
   min_lr: 1.0e-5
   shuffle_buffer: 20000
   prefetch: 4
-  run_dir: runs/default
-  log_file: runs/default/train.log
+  run_dir: runs/projected
+  log_file: runs/projected/train.log
   save_best_only: true
   seed: 42
 

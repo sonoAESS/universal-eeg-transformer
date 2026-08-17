@@ -205,3 +205,53 @@ def test_load_weights_requires_built_layers():
     np.testing.assert_allclose(
         m2.encoders["unipolar"].kernel.numpy(), 0.1337, atol=1e-6
     )
+
+
+def test_group_variant_exact_composition():
+    """variant='group' debe dar consistencia de composición (casi) exacta.
+
+    ``A_{s->d} = W_s (W_d)^+`` hace que el producto ``A_{s->d} A_{d->u}``
+    coincida con ``A_{s->u}`` (módulo el subespacio observable), una
+    propiedad física que el encadenado analítico ``T_d pinv(T_s)`` no cumple.
+    """
+    rng = np.random.default_rng(13)
+    C = 6
+    ds = _fake_dataset(rng, n=1500, C=C)
+    cfg = EEGTransformConfig()
+    cfg.model.latent_dim = C
+    cfg.model.variant = "group"
+    model = UniversalEEGTransformer(n_channels=C, model_cfg=cfg.model)
+    refs = {k: ds.refs[k][ds.split_idx["train"][:1000]] for k in KINDS}
+
+    assert model.decoders["unipolar"] is None
+    model.init_from_data(refs)
+
+    cons = model.composition_error()
+    worst = max(cons.values())
+    # la estructura de grupo se cumple exactamente, sin entrenamiento
+    assert worst < 1e-5, f"peor consistencia group: {worst:.3e}"
+
+
+def test_projected_variant_kills_constant():
+    """variant='projected' debe anular el modo constante por construcción.
+
+    Toda matriz efectiva aprendida (enc/dec) cumple ``1^T W_eff = 0``:
+    entrada constante sobre canales produce salida nula.
+    """
+    rng = np.random.default_rng(17)
+    C = 6
+    ds = _fake_dataset(rng, n=1000, C=C)
+    cfg = EEGTransformConfig()
+    cfg.model.latent_dim = C
+    cfg.model.variant = "projected"
+    model = UniversalEEGTransformer(n_channels=C, model_cfg=cfg.model)
+    refs = {k: ds.refs[k][ds.split_idx["train"][:700]] for k in KINDS}
+    model.init_from_data(refs)
+
+    mats = model.transfer_matrices()
+    ones = np.ones(C)
+    for (s, d), m in mats.items():
+        # column sums de la matriz efectiva ~ 0
+        np.testing.assert_allclose(
+            (ones @ m), np.zeros(C), atol=1e-5, err_msg=f"ruta {s}->{d}"
+        )

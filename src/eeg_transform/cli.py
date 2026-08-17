@@ -66,6 +66,7 @@ def cmd_eval(cfg) -> None:
 
     metrics_df = metrics.evaluate_routes(model, ds, split="test")
     err_matrix = metrics.transfer_error_matrix(model, ds, uni_idx, cfg)
+    cons = metrics.composition_error_table(model, ds)
 
     print("\n================ METRICAS (TEST) ================")
     print(metrics.summarize(metrics_df, "test").to_string(formatters={
@@ -77,8 +78,12 @@ def cmd_eval(cfg) -> None:
     print("\n================ ERROR MATRIZ vs ANALITICA ================")
     print(err_matrix.round(6).to_string(index=False))
 
+    print("\n================ CONSISTENCIA DE COMPOSICION ================")
+    print(cons.round(6).to_string(index=False))
+
     metrics_df.to_csv(run_dir / "metrics_test.csv", index=False)
     err_matrix.to_csv(run_dir / "error_fro_rel.csv", index=False)
+    cons.to_csv(run_dir / "consistency.csv", index=False)
 
     history_csv = run_dir / "history.csv"
     if history_csv.exists():
@@ -94,6 +99,53 @@ def cmd_eval(cfg) -> None:
         n_samples=cfg.evaluation.n_plot_samples,
         run_dir=run_dir,
     )
+
+
+def cmd_compare(runs: list[str]) -> None:
+    """Compara resúmenes de ejecuciones de entrenamiento (solo métricas)."""
+    import pandas as pd
+
+    rows = []
+    for run in runs:
+        run = Path(run)
+        name = run.name
+        metrics_csv = run / "metrics_test.csv"
+        history_csv = run / "history.csv"
+        if not metrics_csv.exists():
+            print(f"[skip] {name}: sin metrics_test.csv")
+            continue
+        m = pd.read_csv(metrics_csv)
+        diag = m[m["origen"] == m["destino"]]
+        off = m[m["origen"] != m["destino"]]
+        conf = run / "config.yaml"
+        variant = "?"
+        try:
+            variant = load_config(conf).model.variant
+        except Exception:
+            pass
+        best_val = None
+        n_epochs = None
+        if history_csv.exists():
+            h = pd.read_csv(history_csv)
+            col = [c for c in h.columns if c.startswith("val_loss_")]
+            if col:
+                best_val = float(h[col[0]].min())
+                n_epochs = int(len(h))
+        rows.append({
+            "run": name,
+            "variant": variant,
+            "rmse_diag_uV": float(diag["rmse"].mean()) * 1e6,
+            "r_diag": float(diag["r"].mean()),
+            "rmse_cross_uV": float(off["rmse"].mean()) * 1e6,
+            "r_cross": float(off["r"].mean()),
+            "val_loss_best": best_val,
+            "epochs": n_epochs,
+        })
+    if not rows:
+        print("No hay ejecuciones comparables.")
+        return
+    df = pd.DataFrame(rows)
+    print(df.round(4).to_string(index=False))
 
 
 def cmd_pipeline(cfg, force: bool) -> None:
@@ -118,6 +170,10 @@ def main(argv: list[str] | None = None) -> int:
     p_train.add_argument("--force", action="store_true",
                          help="Ignora checkpoints previos.")
     p_eval = sub.add_parser("eval", help="Evalúa sobre test y genera figuras.")
+    p_comp = sub.add_parser("compare",
+                            help="Compara resúmenes de varias ejecuciones.")
+    p_comp.add_argument("runs", nargs="+",
+                        help="Directorios de ejecución (p. ej. runs/default).")
     p_pipe = sub.add_parser("pipeline", help="build + train + eval.")
     p_pipe.add_argument("--force", action="store_true")
 
@@ -132,6 +188,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_train(cfg, args.force)
     elif args.command == "eval":
         cmd_eval(cfg)
+    elif args.command == "compare":
+        cmd_compare(args.runs)
     elif args.command == "pipeline":
         cmd_pipeline(cfg, args.force)
     return 0

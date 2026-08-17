@@ -10,7 +10,7 @@ def test_load_default_config(tmp_path):
     from eeg_transform.config import load_config, save_config
 
     cfg = load_config("config/default.yaml")
-    assert cfg.data.subjects == [1, 2, 3, 4]
+    assert cfg.data.subjects == list(range(1, 13))
     assert cfg.leadfield.sigmas == [0.33, 1.0, 0.0042, 0.33]
     assert cfg.model.latent_dim == 0  # auto
 

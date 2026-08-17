@@ -121,6 +121,32 @@ def transfer_error_matrix(
     return pd.DataFrame(rows)
 
 
+def composition_error_table(model, ds) -> pd.DataFrame:
+    """Resumen de la consistencia de composición (propiedad de grupo).
+
+    Para cada triplete ``s -> d -> u`` se mide
+    ``||P(A_{s->d} A_{d->u} - A_{s->u})P||_F / ||P A_{s->u} P||_F``.
+
+    * Un modelo con estructura de grupo exacta (variante ``group``) da 0.
+    * El encadenado analítico ``T_d pinv(T_s)`` no satisface la propiedad
+      (error del orden de 1): compone mal aunque cada ruta individual sea
+      algebraica.
+    """
+    cons = model.composition_error()
+    rows = [
+        {"origen": s, "destino": d, "final": u, "error_comp": v}
+        for (s, d, u), v in cons.items()
+    ]
+    df = pd.DataFrame(rows)
+    # resumen compacto: máximo y media por par origen->destino
+    summary = (
+        df.groupby(["origen", "destino"], as_index=False)["error_comp"]
+        .agg(["mean", "max"])
+        .rename(columns={"mean": "comp_medio", "max": "comp_max"})
+    )
+    return summary.reset_index(drop=True)
+
+
 def summarize(metrics_df: pd.DataFrame, label: str) -> pd.DataFrame:
     """Resumen de métricas por tipo de ruta (diagonal / cruzada)."""
     diag = metrics_df[metrics_df["origen"] == metrics_df["destino"]]

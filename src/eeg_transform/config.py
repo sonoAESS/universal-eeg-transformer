@@ -75,6 +75,16 @@ class DatasetConfig:
     dtype: str = "float32"
 
 
+# Variantes de arquitectura del transformador (ver models.universal_transformer).
+#   * ``free``     : autoencoder lineal libre (todas las matrices aprendidas).
+#   * ``group``    : decodificador = pseudo-inversa del encoder del mismo
+#                    montaje; impone consistencia de composición EXACTA
+#                    (transitividad y auto-reconstrucción = proyector).
+#   * ``projected``: todas las matrices aprendidas anulan por construcción el
+#                    modo constante (físicamente válidas como referencias).
+MODEL_VARIANTS: tuple[str, ...] = ("free", "group", "projected")
+
+
 @dataclass
 class ModelConfig:
     """Arquitectura del autoencoder lineal All-to-All."""
@@ -84,6 +94,7 @@ class ModelConfig:
     kernel_regularizer_l2: float = 1e-6
     optimizer: str = "adam"
     learning_rate: float = 1e-3
+    variant: str = "free"
 
 
 @dataclass
@@ -173,6 +184,20 @@ class EEGTransformConfig:
             raise ValueError("Las fracciones de split deben estar en (0, 1).")
         if self.model.latent_dim < 0:
             raise ValueError("latent_dim debe ser >= 1 (o 0 para usar n_canales).")
+        if self.model.variant not in MODEL_VARIANTS:
+            raise ValueError(
+                f"model.variant debe ser una de {MODEL_VARIANTS}, "
+                f"no '{self.model.variant}'."
+            )
+        if self.model.variant == "group" and self.model.use_bias:
+            raise ValueError("variant='group' requiere use_bias: false.")
+        if self.model.variant == "group" and not (
+            self.model.latent_dim in (0, -1)
+        ):
+            raise ValueError(
+                "variant='group' requiere latent_dim 0/auto (debe igualar "
+                "n_canales para pseudo-invertir)."
+            )
         if len(self.leadfield.rel_radii) != len(self.leadfield.sigmas):
             raise ValueError(
                 "rel_radii y sigmas deben tener la misma longitud (capas concéntricas)."

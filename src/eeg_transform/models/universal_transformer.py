@@ -16,6 +16,31 @@ re-escalado de señales se preservan de forma exacta.
 La pérdida se calcula en escala adimensional (Z-score por lote) para que las
 16 rutas tengan el mismo peso en la retropropagación, y también se registran
 métricas en unidades reales (voltios).
+
+Variantes de arquitectura (``model.variant``):
+
+* ``free``
+    Autoencoder libre: 8 matrices `C x C` aprendidas sin restricciones.
+* ``group``
+    El decodificador de cada montaje es la **pseudo-inversa** del encoder del
+    mismo montaje (``W^{dec}_k = (W^{enc}_k)^+``); no hay variables de
+    decodificador. Esto impone de forma *exacta* dos propiedades físicas que
+    el encadenado analítico ``T_d pinv(T_s)`` no satisface (el error de
+    composición del baseline analítico es del orden de 1):
+
+    - ``A_{s->s} = W_s (W_s)^+`` es un proyector: identidad sobre el subespacio
+      observable (señales sin componente constante).
+    - Transitividad exacta: ``A_{s->d} A_{d->u} = A_{s->u}`` para todo
+      par, de modo que las referencias forman un **grupo** en el subespacio
+      observable. Los encoders usan la proyección ``P`` (como en
+      ``projected``), lo que garantiza la exactitud incluso con las matrices
+      empíricas de inicialización.
+
+* ``projected``
+    Cada matriz aprendida se parametriza como ``W = P W_raw`` con ``P =
+    I - 11^T/C``; por construcción toda salida anula el modo constante
+    instantáneo (todas las rutas son "referencias válidas", no pueden
+    introducir un DC espurio).
 """
 
 from __future__ import annotations
@@ -26,13 +51,103 @@ from typing import Any, Dict, Tuple
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, losses
+from tensorflow.keras.initializers import Initializer
+from tensorflow.keras.regularizers import Regularizer
 
-from ..config import REFERENCE_KINDS, ModelConfig
+from ..config import MODEL_VARIANTS, REFERENCE_KINDS, ModelConfig
 from ..logging_conf import get_logger
 
 log = get_logger(__name__)
 
 INITIALIZER_SEED = 42
+
+VARIANT_FREE = "free"
+VARIANT_GROUP = "group"
+VARIANT_PROJECTED = "projected"
+
+
+class _CenteredDense(layers.Layer):
+    """Dense lineal cuya salida anula el modo constante instantáneo.
+
+    Modos de centrado sobre el kernel efectivo:
+
+    * ``"col"`` (``W_eff = P @ W``): ``1^T W_eff = 0`` → la salida anula una
+      entrada constante sobre canales (propiedad básica de referencia).
+    * ``"both"`` (``W_eff = P @ W @ P``): además ``W_eff @ 1 = 0`` → el
+      *rowspace* vive en el subespacio observable. Con ``P`` el proyector de
+      centrado ``I - 11^T/C``. Requiere ``units == n_channels`` y garantiza
+      que una familia ``W_k`` comparta el mismo subespacio observable, lo que
+      hace exacta la composición de grupo de la variante ``group``.
+    """
+
+    def __init__(
+        self,
+        units: int,
+        n_channels: int,
+        use_bias: bool = False,
+        kernel_regularizer: Regularizer | None = None,
+        kernel_initializer: Initializer | Any = None,
+        name: str = "centered_dense",
+        center_mode: str = "col",
+    ):
+        super().__init__(name=name)
+        self.units = units
+        self.n_channels = n_channels
+        self.use_bias = use_bias
+        self.kernel_regularizer = kernel_regularizer
+        self.kernel_initializer = kernel_initializer
+        self.center_mode = center_mode
+        self.proj = tf.constant(
+            np.eye(n_channels, dtype=np.float32)
+            - np.ones((n_channels, n_channels), dtype=np.float32) / n_channels,
+            dtype=tf.float32, name="p_centrado",
+        )
+        if self.center_mode not in ("col", "both"):
+            raise ValueError(f"center_mode debe ser 'col' o 'both': {center_mode}")
+
+    def build(self, input_shape):
+        self.kernel = self.add_weight(
+            name="kernel",
+            shape=(self.n_channels, self.units),
+            initializer=self.kernel_initializer or "glorot_uniform",
+            regularizer=self.kernel_regularizer,
+            trainable=True,
+        )
+        if self.use_bias:
+            self.bias = self.add_weight(
+                name="bias", shape=(self.units,), initializer="zeros",
+                trainable=True,
+            )
+        self.built = True
+
+    def _effective(self, w: tf.Tensor) -> tf.Tensor:
+        out = tf.matmul(self.proj, w)          # (n_channels, units)
+        if self.center_mode == "both":
+            out = tf.matmul(out, self.proj)    # (n_channels, n_channels)
+        return out
+
+    def call(self, inputs):
+        out = tf.matmul(inputs, self._effective(self.kernel))
+        if self.use_bias:
+            out = out + self.bias
+        return out
+
+    def get_config(self):
+        from tensorflow.keras.initializers import serialize as s_init
+        from tensorflow.keras.regularizers import serialize as s_reg
+
+        cfg = {
+            "units": self.units,
+            "n_channels": self.n_channels,
+            "use_bias": self.use_bias,
+            "kernel_regularizer": s_reg(self.kernel_regularizer)
+            if self.kernel_regularizer else None,
+            "kernel_initializer": s_init(self.kernel_initializer)
+            if isinstance(self.kernel_initializer, Initializer) else None,
+            "name": self.name,
+            "center_mode": self.center_mode,
+        }
+        return cfg
 
 
 class UniversalEEGTransformer(tf.keras.Model):
@@ -45,35 +160,64 @@ class UniversalEEGTransformer(tf.keras.Model):
         self.model_cfg = model_cfg
         self.kinds = list(REFERENCE_KINDS)
         self.latent_dim = int(model_cfg.latent_dim)
+        self.variant = (
+            model_cfg.variant if model_cfg.variant in MODEL_VARIANTS
+            else VARIANT_FREE
+        )
 
         regularizer = (
             tf.keras.regularizers.L2(model_cfg.kernel_regularizer_l2)
             if model_cfg.kernel_regularizer_l2 > 0
             else None
         )
-        # GlorotUniform (inicialización por defecto) ofrece mejores dinámicas
-        # que los inicializadores ortogonales para esta factorización lineal.
         kernel_init = tf.keras.initializers.GlorotUniform(seed=INITIALIZER_SEED)
 
-        self.encoders = {
-            k: layers.Dense(
-                self.latent_dim,
-                use_bias=model_cfg.use_bias,
-                kernel_regularizer=regularizer,
-                kernel_initializer=kernel_init,
+        def _make_enc(k: str) -> layers.Layer:
+            if self.variant == VARIANT_PROJECTED:
+                return _CenteredDense(
+                    self.latent_dim, n_channels,
+                    use_bias=model_cfg.use_bias,
+                    kernel_regularizer=regularizer,
+                    kernel_initializer=kernel_init, name=f"enc_{k}",
+                    center_mode="col",
+                )
+            if self.variant == VARIANT_GROUP:
+                # Centrado doble (observable) para que las pseudo-inversas de
+                # montajes distintos compartan subespacio y la composición de
+                # grupo sea exacta.
+                return _CenteredDense(
+                    self.latent_dim, n_channels,
+                    use_bias=model_cfg.use_bias,
+                    kernel_regularizer=regularizer,
+                    kernel_initializer=kernel_init, name=f"enc_{k}",
+                    center_mode="both",
+                )
+            return layers.Dense(
+                self.latent_dim, use_bias=model_cfg.use_bias,
+                kernel_regularizer=regularizer, kernel_initializer=kernel_init,
                 name=f"enc_{k}",
             )
-            for k in self.kinds
-        }
-        self.decoders = {
-            k: layers.Dense(
-                n_channels,
-                use_bias=model_cfg.use_bias,
-                kernel_regularizer=regularizer,
+
+        def _make_dec(k: str) -> layers.Layer | None:
+            if self.variant == VARIANT_GROUP:
+                # El decodificador es la pseudo-inversa del encoder del mismo
+                # montaje; no hay variables propias.
+                return None
+            if self.variant == VARIANT_PROJECTED:
+                return _CenteredDense(
+                    n_channels, n_channels,
+                    use_bias=model_cfg.use_bias,
+                    kernel_regularizer=regularizer,
+                    kernel_initializer=kernel_init, name=f"dec_{k}",
+                )
+            return layers.Dense(
+                n_channels, use_bias=model_cfg.use_bias,
+                kernel_regularizer=regularizer, kernel_initializer=kernel_init,
                 name=f"dec_{k}",
             )
-            for k in self.kinds
-        }
+
+        self.encoders = {k: _make_enc(k) for k in self.kinds}
+        self.decoders = {k: _make_dec(k) for k in self.kinds}
         self.loss_tracker = tf.keras.metrics.Mean(name="loss_estandarizada")
         self.mse_tracker = tf.keras.metrics.Mean(name="mse_real_V2")
         # Las capas se crean en __init__ (no en build), pero el bucle de
@@ -82,6 +226,9 @@ class UniversalEEGTransformer(tf.keras.Model):
         # para permitir saving/checkpoints de Keras 3.
         self.built = True
 
+    # ------------------------------------------------------------------
+    # Construcción / persistencia
+    # ------------------------------------------------------------------
     def ensure_built(self) -> None:
         """Construye explícitamente las capas Dense (kernels/bias).
 
@@ -95,7 +242,7 @@ class UniversalEEGTransformer(tf.keras.Model):
             if not enc.built:
                 enc.build((None, self.n_channels))
         for dec in self.decoders.values():
-            if not dec.built:
+            if dec is not None and not dec.built:
                 dec.build((None, self.latent_dim))
 
     # ------------------------------------------------------------------
@@ -108,9 +255,11 @@ class UniversalEEGTransformer(tf.keras.Model):
         lineales, existe una factorización *exacta* con espacio latente de
         dimensión ``C``: si ``z = x_unipolar``, entonces ``W_enc^s`` es la
         regresión ridge ``x_s -> z`` y ``W_dec^d`` la regresión ridge
-        ``z -> x_d``. La composición ``W_enc^s W_dec^d`` reproduce entonces
-        cada ruta ``s->d`` casi a la perfección desde la época 0, y el
-        entrenamiento solo la ajusta.
+        ``z -> x_d``.
+
+        * En ``free``/``projected`` se asignan encoder y decoder por ruta.
+        * En ``group`` solo se asignan los encoders ``W_enc^k = ridge(x_k ->
+          z)``; los decodificadores (pseudo-inversas) se derivan en el forward.
 
         Parameters
         ----------
@@ -128,8 +277,6 @@ class UniversalEEGTransformer(tf.keras.Model):
                 f"({self.latent_dim} != {self.n_channels})."
             )
         C = self.n_channels
-        # Garantiza que las Variables kernel/bias existan (Keras construye las
-        # capas perezosamente en la primera llamada).
         self.ensure_built()
 
         uni = refs["unipolar"].astype(np.float32)
@@ -141,11 +288,12 @@ class UniversalEEGTransformer(tf.keras.Model):
             lmb = float(ridge * np.trace(xtx) / C + 1e-15)
             return np.linalg.solve(xtx + lmb * np.eye(C), x.T @ y / n).astype(np.float32)
 
-        for d in self.kinds:
-            w = _ridge(uni - means["unipolar"], refs[d] - means[d])
-            self.decoders[d].kernel.assign(w)
-            if self.decoders[d].use_bias:
-                self.decoders[d].bias.assign(np.zeros(C, np.float32))
+        if self.variant != VARIANT_GROUP:
+            for d in self.kinds:
+                w = _ridge(uni - means["unipolar"], refs[d] - means[d])
+                self.decoders[d].kernel.assign(w)
+                if self.decoders[d].use_bias:
+                    self.decoders[d].bias.assign(np.zeros(C, np.float32))
         for s in self.kinds:
             w = _ridge(refs[s] - means[s], uni - means["unipolar"])
             self.encoders[s].kernel.assign(w)
@@ -159,7 +307,17 @@ class UniversalEEGTransformer(tf.keras.Model):
         return self.encoders[source](inputs)
 
     def decode(self, latent: tf.Tensor, dest: str) -> tf.Tensor:
+        if self.variant == VARIANT_GROUP:
+            w = self._effective_kernel_tf(self.encoders[dest])  # (C, C)
+            winv = tf.linalg.pinv(w)
+            return tf.matmul(latent, winv)
         return self.decoders[dest](latent)
+
+    def _effective_kernel_tf(self, layer: layers.Layer) -> tf.Tensor:
+        w = layer.kernel
+        if isinstance(layer, _CenteredDense):
+            return layer._effective(w)
+        return w
 
     def call(self, inputs, source: str | None = None, **kwargs):
         """Predicción universal.
@@ -188,18 +346,55 @@ class UniversalEEGTransformer(tf.keras.Model):
     # ------------------------------------------------------------------
     # Matrices de transferencia efectivas (rendimiento físico)
     # ------------------------------------------------------------------
+    def _effective_kernel(self, layer: layers.Layer | None) -> np.ndarray:
+        if layer is None:
+            return None
+        w = layer.kernel.numpy().astype(np.float64)
+        if isinstance(layer, _CenteredDense):
+            p = np.eye(self.n_channels, dtype=np.float64) - np.ones(
+                (self.n_channels, self.n_channels), dtype=np.float64) / self.n_channels
+            out = p @ w
+            if layer.center_mode == "both":
+                out = out @ p
+            return out
+        return w
+
     def transfer_matrices(self) -> Dict[Tuple[str, str], np.ndarray]:
-        """Devuelve ``A_{s->d} = W^enc_s @ W^dec_d`` para cada ruta (C x C)."""
-        # garantiza que las capas estén construidas
-        z = tf.zeros((1, self.n_channels))
-        z = self._predict_from(z, self.kinds[0])
+        """Devuelve ``A_{s->d}`` para cada ruta (C x C), según la variante.
+
+        * ``free``/``projected``: ``W_enc^s @ W_dec^d``.
+        * ``group``: ``W_enc^s @ pinv(W_enc^d)``.
+        """
+        enc = {k: self._effective_kernel(self.encoders[k]) for k in self.kinds}
+        dec = {k: self._effective_kernel(self.decoders[k]) for k in self.kinds}
         out: Dict[Tuple[str, str], np.ndarray] = {}
         for s in self.kinds:
-            w_e = self.encoders[s].kernel.numpy()       # (C, latent)
             for d in self.kinds:
-                w_d = self.decoders[d].kernel.numpy()   # (latent, C)
-                out[(s, d)] = w_e @ w_d
+                if self.variant == VARIANT_GROUP:
+                    out[(s, d)] = enc[s] @ np.linalg.pinv(enc[d], rcond=1e-8)
+                else:
+                    out[(s, d)] = enc[s] @ dec[d]
         return out
+
+    def composition_error(self) -> Dict[Tuple[str, str, str], float]:
+        """Error de composición (física de grupo) por triplete ``s->d->u``.
+
+        Mide ``||P(A_{s->d} A_{d->u} - A_{s->u})P||_F / ||P A_{s->u} P||_F``
+        con ``P`` el proyector de centrado. Es 0 exacto para la variante
+        ``group`` y ``~1`` para el encadenado analítico ``T_d pinv(T_s)``.
+        """
+        C = self.n_channels
+        p = np.eye(C) - np.ones((C, C)) / C
+        mats = self.transfer_matrices()
+        rows: Dict[Tuple[str, str, str], float] = {}
+        for s in self.kinds:
+            for d in self.kinds:
+                for u in self.kinds:
+                    lhs = p @ (mats[(s, d)] @ mats[(d, u)]) @ p
+                    rhs = p @ mats[(s, u)] @ p
+                    denom = np.linalg.norm(rhs, "fro") + 1e-15
+                    rows[(s, d, u)] = float(np.linalg.norm(lhs - rhs, "fro") / denom)
+        return rows
 
     # ------------------------------------------------------------------
     # Pérdida estandarizada (Z-score por lote)
