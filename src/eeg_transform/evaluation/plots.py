@@ -139,3 +139,111 @@ def plot_traces(model, ds, split: str, channel: str, n_samples: int,
                 run_dir: Path) -> None:
     _save(traces_fig(model, ds, split, channel, n_samples), run_dir,
           "traces.png")
+
+
+# ---------------------------------------------------------------------------
+# Montaje: heatmaps de cuero cabelludo (actividad como "manchas")
+# ---------------------------------------------------------------------------
+def _render_scalp_field(
+    values: np.ndarray,
+    matrix: np.ndarray,
+    valid: np.ndarray,
+    grid_px: int,
+) -> np.ndarray:
+    """Interpola un vector de canales a imagen ``(grid_px, grid_px)`` (mask)."""
+    out = (matrix @ values).astype(np.float64)   # (n_grid,)
+    out[~valid] = np.nan                          # fuera del cuero cabelludo
+    return out.reshape(grid_px, grid_px)
+
+
+def _electrode_disc(positions: np.ndarray, grid_px: int):
+    """Electrodos 3D proyectados a coordenadas de píxel (vista central)."""
+    from ..mapping import _project_to_disc
+
+    xy = _project_to_disc(np.asarray(positions, dtype=np.float64))
+    px = ((xy[:, 0] + 1.0) / 2.0 * (grid_px - 1))
+    py = ((1.0 - (xy[:, 1] + 1.0) / 2.0) * (grid_px - 1))
+    return px, py
+
+
+def scalp_heatmap_fig(
+    model,
+    ds,
+    montage_inputs,
+    cfg,
+    split: str = "test",
+    n_samples: int = 400,
+    grid_px: int | None = None,
+) -> plt.Figure:
+    """Mapas de calor del cuero cabelludo por referencia (montaje → canónico).
+
+    Cada fila es una referencia canónica; cada columna una etapa de la
+    unificación de montajes:
+
+    1. **Observación** del montaje fuente (electrodos como puntos, actividad
+       interpolada como manchas; los electrodos se muestran superpuestos).
+    2. **Proyección analítica** (``obs @ P``, sin aprendizaje).
+    3. **Modelo** (autoencoder universal que refina la proyección).
+    4. **Verdad canónica** (objetivo).
+
+    El instante mostrado es el de máxima amplitud global de la verdad canónica
+    (máxima varianza entre canales) para que las manchas sean visibles.
+    """
+    import tensorflow as tf
+
+    from ..mapping import scalp_grid_matrix
+
+    grid_px = grid_px or getattr(cfg.mapping, "grid_px", 48)
+    idx = ds.split_idx[split][:n_samples]
+    M_src, valid_s, _ = scalp_grid_matrix(montage_inputs.src_positions, grid_px)
+    M_can, valid_c, _ = scalp_grid_matrix(np.asarray(ds.ch_positions), grid_px)
+    px_s, py_s = _electrode_disc(montage_inputs.src_positions, grid_px)
+    px_c, py_c = _electrode_disc(np.asarray(ds.ch_positions), grid_px)
+
+    fig, axes = plt.subplots(len(KINDS), 4, figsize=(17, 4.2 * len(KINDS)))
+    for row_k, kind in enumerate(KINDS):
+        target = ds.refs[kind][idx]
+        t = int(np.argmax(target.std(0)))
+        obs = montage_inputs.src_refs[split][kind][:n_samples]
+        pred = model(tf.convert_to_tensor(obs, tf.float32), source=kind)[kind].numpy()
+        base = obs @ montage_inputs.projection
+
+        ims = [
+            _render_scalp_field(obs[t], M_src, valid_s, grid_px),
+            _render_scalp_field(base[t], M_can, valid_c, grid_px),
+            _render_scalp_field(pred[t], M_can, valid_c, grid_px),
+            _render_scalp_field(target[t], M_can, valid_c, grid_px),
+        ]
+        titles = [f"Observación\nmontaje {montage_inputs.montage}",
+                  "Proyección analítica", "Modelo", "Verdad canónica"]
+        vmax = max(np.nanmax(np.abs(m)) for m in ims) or 1.0
+        artist: plt.Figure | None = None
+        for col, (im, title) in enumerate(zip(ims, titles)):
+            ax = axes[row_k, col]
+            im_ = ax.imshow(im, cmap="seismic", vmin=-vmax, vmax=vmax,
+                            origin="upper")
+            if col == 0:
+                artist = im_
+            ax.set_xticks([]); ax.set_yticks([])
+            ax.set_title(f"{KIND_LABELS[kind]} — {title}", fontsize=9)
+            px, py = (px_s, py_s) if col == 0 else (px_c, py_c)
+            ax.scatter(px, py, s=6, color="k", marker="o", zorder=5, linewidths=0)
+        fig.colorbar(artist, ax=axes[row_k, :3], shrink=0.75, pad=0.01)
+
+    fig.suptitle(
+        "Unificación de montajes: la actividad se estima desde el montaje "
+        "fuente como manchas sobre el cuero cabelludo",
+        fontsize=11,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    return fig
+
+
+def plot_scalp_heatmap(model, ds, montage_inputs, cfg, run_dir: Path,
+                       split: str = "test", n_samples: int = 400) -> None:
+    """Guarda el heatmap de montaje en ``runs/<dir>/figs/scalp_heatmap.png``."""
+    fig = scalp_heatmap_fig(model, ds, montage_inputs, cfg, split=split,
+                            n_samples=n_samples)
+    fig.savefig(run_dir / "figs" / "scalp_heatmap.png", dpi=140,
+                bbox_inches="tight")
+    plt.close(fig)

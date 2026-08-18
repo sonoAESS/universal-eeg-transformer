@@ -25,7 +25,12 @@ from .config import EEGTransformConfig, load_config
 from .data.dataset import MultiReferenceDataset, build_dataset
 from .evaluation import metrics, plots
 from .logging_conf import get_logger
-from .training.trainer import build_model, train
+from .training.trainer import (
+    build_model,
+    build_montage_inputs,
+    is_montage_variant,
+    train,
+)
 
 log = get_logger(__name__)
 
@@ -41,6 +46,13 @@ def load_experiment(
     return cfg, ds
 
 
+def montage_inputs(cfg: EEGTransformConfig, ds: MultiReferenceDataset):
+    """Insumo de montaje (observaciones + proyección) para variantes ``montage_*``."""
+    if not is_montage_variant(cfg):
+        return None
+    return build_montage_inputs(cfg, ds)
+
+
 def ensure_model(
     cfg: EEGTransformConfig,
     ds: MultiReferenceDataset,
@@ -53,7 +65,9 @@ def ensure_model(
     """
     run_dir = Path(cfg.training.run_dir)
     checkpoint = run_dir / "best.weights.h5"
-    model = build_model(cfg, ds.n_channels)
+    mi = montage_inputs(cfg, ds)
+    model = build_model(cfg, ds.n_channels,
+                        projection=mi.projection if mi else None)
     model.ensure_built()
     if checkpoint.exists():
         model.load_weights(str(checkpoint))
@@ -88,6 +102,41 @@ def evaluate(
     err_matrix = metrics.transfer_error_matrix(model, ds, uni_idx, cfg)
     cons = metrics.composition_error_table(model, ds)
     return metrics_df, err_matrix, cons
+
+
+def evaluate_montage(
+    cfg: EEGTransformConfig,
+    ds: MultiReferenceDataset,
+    model,
+    montage: object | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Evaluación de montaje: métricas por ruta y resumen modelo vs proyección.
+
+    Returns
+    -------
+    ``(metrics_df, summary)`` con la línea base analítica (``obs @ P``) en
+    columnas ``*_proy`` para cuantificar la ganancia del aprendizaje.
+    """
+    montage = montage or montage_inputs(cfg, ds)
+    if montage is None:
+        raise ValueError("evaluate_montage requiere una variante 'montage_*'.")
+    metrics_df = metrics.evaluate_montage_routes(model, ds, montage,
+                                                 split="test")
+    summary = metrics.summarize_montage(metrics_df)
+    return metrics_df, summary
+
+
+def plot_scalp(cfg, ds, model, montage=None):
+    """Heatmap de cuero cabelludo (electrodos como manchas) para notebooks."""
+    plots.set_plot_backend("inline")
+    montage = montage or montage_inputs(cfg, ds)
+    if montage is None:
+        raise ValueError("plot_scalp requiere una variante 'montage_*'.")
+    return plots.scalp_heatmap_fig(
+        model, ds, montage, cfg, split="test",
+        n_samples=cfg.evaluation.n_plot_samples,
+        grid_px=cfg.mapping.grid_px,
+    )
 
 
 def summarize(metrics_df: pd.DataFrame) -> pd.DataFrame:

@@ -53,17 +53,49 @@ def cmd_eval(cfg) -> None:
 
     from .data.dataset import MultiReferenceDataset, build_dataset
     from .evaluation import metrics, plots
-    from .training.trainer import build_model
+    from .training.trainer import (
+        build_model,
+        build_montage_inputs,
+        is_montage_variant,
+    )
 
     run_dir = Path(cfg.training.run_dir)
     ds = build_dataset(cfg)
 
-    model = build_model(cfg, ds.n_channels)
+    montage = build_montage_inputs(cfg, ds) if is_montage_variant(cfg) else None
+    model = build_model(cfg, ds.n_channels,
+                        projection=montage.projection if montage else None)
     model.ensure_built()
     model.load_weights(str(run_dir / "best.weights.h5"))
     model.compile(optimizer="adam")
 
     uni_idx = ds.ch_names.index(cfg.data.unipolar_ref_ch)
+
+    if montage is not None:
+        metrics_df = metrics.evaluate_montage_routes(model, ds, montage,
+                                                     split="test")
+        summary = metrics.summarize_montage(metrics_df)
+        print("\n================ MONTAJE (TEST) ================")
+        print(f"Origen: {montage.montage} ({len(montage.src_names)} canales) "
+              f"via '{montage.method}' → canónico ({ds.n_channels})")
+        print(summary.to_string(formatters={
+            "rmse_uV_model": "{:.3f}".format,
+            "rmse_uV_proy": "{:.3f}".format,
+            "r_model": "{:.4f}".format,
+            "ve_model": "{:.3f}".format,
+            "r_proy": "{:.4f}".format,
+            "ve_proy": "{:.3f}".format}))
+        print("\nDetalle por ruta (modelo vs proyección analítica):")
+        print(metrics_df.round(9).to_string(index=False))
+        metrics_df.to_csv(run_dir / "metrics_test.csv", index=False)
+
+        history_csv = run_dir / "history.csv"
+        if history_csv.exists():
+            plots.plot_learning_curves(history_csv, run_dir)
+        plots.plot_heatmap(metrics_df, "rmse", "RMSE real por ruta (V)",
+                           run_dir, "heatmap_rmse.png")
+        plots.plot_scalp_heatmap(model, ds, montage, cfg, run_dir)
+        return
 
     metrics_df = metrics.evaluate_routes(model, ds, split="test")
     err_matrix = metrics.transfer_error_matrix(model, ds, uni_idx, cfg)

@@ -81,6 +81,104 @@ def evaluate_routes(
     return pd.DataFrame(rows)
 
 
+def predict_montage_routes(model, sources: dict[str, np.ndarray]) -> dict[str, dict[str, np.ndarray]]:
+    """Predice los canales canónicos desde observaciones del montaje fuente.
+
+    Parameters
+    ----------
+    sources:
+        ``{kind: (n, C_s)}`` observaciones de las 4 referencias del montaje
+        fuente.
+    Returns
+    -------
+    ``{src: {dst: predicción (n, C)}}``.
+    """
+    out = {}
+    tensors = {k: tf.convert_to_tensor(v, dtype=tf.float32) for k, v in sources.items()}
+    for s in KINDS:
+        preds = model(tensors[s], source=s)
+        out[s] = {d: preds[d].numpy() for d in KINDS}
+    return out
+
+
+def _route_stats(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+    """Métricas de una ruta sobre el subespacio observable (centrado temporal)."""
+    y_true = y_true.astype(np.float64)
+    y_pred = y_pred.astype(np.float64)
+    t = y_true - y_true.mean(1, keepdims=True)
+    p = y_pred - y_pred.mean(1, keepdims=True)
+    err = t - p
+    mse = float(np.mean(err ** 2))
+    corr = []
+    for c in range(t.shape[1]):
+        if np.std(t[:, c]) < 1e-20:
+            continue
+        corr.append(float(np.corrcoef(t[:, c], p[:, c])[0, 1]))
+    ve = float(1.0 - np.sum(err ** 2) / (np.sum(t ** 2) + 1e-15))
+    return {
+        "mse": mse,
+        "rmse": float(np.sqrt(mse)),
+        "mae": float(np.mean(np.abs(err))),
+        "r": float(np.mean(corr)) if corr else 0.0,
+        "ve": ve,
+    }
+
+
+def evaluate_montage_routes(
+    model,
+    ds,
+    montage_inputs,
+    split: str = "test",
+) -> pd.DataFrame:
+    """Métricas por ruta desde el montaje fuente al espacio canónico.
+
+    Además de las métricas del modelo (<modelo>>), se incluye la línea base
+    **analítica** de proyección pura ``obs @ P`` (sin aprendizaje): columnas
+    ``rmse_proy``, ``r_proy`` y ``ve_proy``. La ganancia del modelo sobre la
+    proyección cuantifica cuánto aporta el refinamiento aprendido.
+    """
+    idx = ds.split_idx[split]
+    sources = {k: montage_inputs.src_refs[split][k] for k in KINDS}
+    targets = {k: ds.refs[k][idx] for k in KINDS}
+    projection = montage_inputs.projection
+    preds = predict_montage_routes(model, sources)
+
+    rows = []
+    for s in KINDS:
+        baseline_s = sources[s] @ projection
+        for d in KINDS:
+            st = _route_stats(targets[d], preds[s][d])
+            stb = _route_stats(targets[d], baseline_s)
+            rows.append({
+                "origen": s,
+                "destino": d,
+                "mse": st["mse"], "rmse": st["rmse"], "mae": st["mae"],
+                "r": st["r"], "ve": st["ve"],
+                "rmse_proy": stb["rmse"], "r_proy": stb["r"],
+                "ve_proy": stb["ve"],
+            })
+    return pd.DataFrame(rows)
+
+
+def summarize_montage(metrics_df: pd.DataFrame) -> pd.DataFrame:
+    """Resumen diagonal/cruzada de una ruta: modelo vs proyección analítica."""
+    diag = metrics_df[metrics_df["origen"] == metrics_df["destino"]]
+    off = metrics_df[metrics_df["origen"] != metrics_df["destino"]]
+    rows = []
+    for label, g in (("auto-reconstrucción (diagonal)", diag),
+                     ("transformación cruzada", off)):
+        rows.append({
+            "tipo": label,
+            "rmse_uV_model": g["rmse"].mean() * 1e6,
+            "r_model": g["r"].mean(),
+            "ve_model": g["ve"].mean(),
+            "rmse_uV_proy": g["rmse_proy"].mean() * 1e6,
+            "r_proy": g["r_proy"].mean(),
+            "ve_proy": g["ve_proy"].mean(),
+        })
+    return pd.DataFrame(rows)
+
+
 def transfer_error_matrix(
     model,
     ds,
