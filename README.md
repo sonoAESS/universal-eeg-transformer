@@ -92,6 +92,13 @@ pon `FORCE = True` solo para reentrenar desde cero.
 | `notebooks/soft_group.ipynb` | `config/soft_group.yaml` | grupo suave por regularización |
 | `notebooks/wide.ipynb` | `config/wide.yaml` | free con latente 128 |
 | `notebooks/bottleneck.ipynb` | `config/bottleneck.yaml` | free con latente 32 |
+| `notebooks/montage_leadfield.ipynb` | `config/montage_leadfield.yaml` | unificación por solución inversa (lead field) |
+| `notebooks/montage_heatmap.ipynb` | `config/montage_heatmap.yaml` | unificación por mapas de calor (spline) |
+
+Los notebooks de montaje estiman las 4 referencias canónicas (64 canales) desde
+**cualquier configuración de electrodos** (p. ej. 10-20, 19 canales) y muestran
+la actividad como **mapas de calor del cuero cabelludo** (electrodos → manchas):
+observación del montaje fuente → proyección analítica → modelo → verdad canónica.
 
 Para abrirlos y ejecutarlos con el entorno del proyecto:
 
@@ -108,8 +115,9 @@ PYTHONPATH=src entorno/bin/python notebooks/generate_notebooks.py
 
 Variantes disponibles en `config/` (vía `model.variant`): `default.yaml`
 (`free`), `group.yaml`, `projected.yaml`, `soft_group.yaml`, y exploraciones
-de latente `wide.yaml` (128) / `bottleneck.yaml` (32). Resultados:
-`docs/results_comparison.md`.
+de latente `wide.yaml` (128) / `bottleneck.yaml` (32), y las variantes de
+**unificación de montajes** `montage_leadfield.yaml` / `montage_heatmap.yaml`.
+Resultados: `docs/results_comparison.md` y `docs/mapping_wip.md`.
 
 * `build`: descarga los sujetos/corridas indicados, filtra (bandpass y notch), marca artefactos y canales malos por MAD z-score, revisa la referencia del dato original (`original_reference`) y construye las 4 referencias alineadas (unipolar, bipolar, CAR, REST), guardando `data/processed/dataset_{mode}_{subjects}.npz` y `*_leadfield.npz`. Splits por bloques temporales (`block`) o por sujeto (`subject`).
 * `train`: escribe checkpoints en `runs/<nombre>/` (`best.weights.h5`, `model.keras`, `history.csv`).
@@ -128,21 +136,26 @@ de latente `wide.yaml` (128) / `bottleneck.yaml` (32). Resultados:
 │   ├── projected.ipynb          # anulación del modo constante
 │   ├── soft_group.ipynb         # grupo suave por regularización
 │   ├── wide.ipynb               # latente 128
-│   └── bottleneck.ipynb         # latente 32
+│   ├── bottleneck.ipynb         # latente 32
+│   ├── montage_leadfield.ipynb  # unificación por solución inversa (lead field)
+│   └── montage_heatmap.ipynb    # unificación por mapas de calor (spline)
 ├── docs/
 │   ├── model_variants.md        # descripción de las variantes de arquitectura
+│   ├── mapping_wip.md           # unificación de montajes (WIP → resultados)
 │   └── results_comparison.md    # tabla comparativa y análisis (sujetos 1–12)
 ├── src/eeg_transform/
 │   ├── config.py                # dataclasses + carga/validación YAML
 │   ├── references.py            # matrices de referencia + REST
 │   ├── leadfield.py             # lead field analítico (esfera 4 capas, MNE)
+│   ├── mapping.py               # proyección entre montajes (spline/leadfield)
 │   ├── data/loader.py           # descarga eegbci y preprocesado
 │   ├── data/dataset.py          # dataset multi-referencia + splits + caché
-│   ├── models/universal_transformer.py   # autoencoder lineal All-to-All
+│   ├── models/universal_transformer.py   # autoencoder lineal All-to-All (+ modo montaje)
 │   ├── training/trainer.py      # bucles/callbacks TF
 │   ├── evaluation/{metrics,plots}.py
+│   ├── experiments/montage.py   # experimento de reconstrucción de montajes
 │   ├── nb.py                    # helpers compartidos para los notebooks
-│   └── cli.py                   # comandos build/train/eval/pipeline
+│   └── cli.py                   # comandos build/train/eval/pipeline/montage
 └── tests/
     ├── test_physics.py          # propiedades de las referencias y REST
     ├── test_config_ds.py        # config y dataset

@@ -95,3 +95,36 @@ cambiar la conclusión física.
 | Transitividad exacta + buena precisión     | `soft_group`  |
 | Fisicalidad estructural (grupo exacto)     | `group` (solo conceptual) |
 | Referencia rápida sin entrenar             | analítico `T_d pinv(T_s)` (no transitivo) |
+
+## Unificación de montajes (variantes `montage_*`)
+
+**Fecha:** 2026-08-18 · Mismo dataset (12 sujetos) con el montaje **10-20
+(19 canales)** como configuración de electrodos de origen → canónico de 64.
+El transformador universal estima las 4 referencias canónicas desde
+observaciones del montaje fuente proyectadas con una matriz fija `P`
+(`mapping.build_projection`). Las métricas comparan la estimación (modelo)
+contra la proyección analítica pura `obs @ P` (`*_proy`).
+
+| Variante | método P | rmse cross (µV) | r cross | ve cross | ve_proy | mejor que P |
+|----------|----------|----------------:|--------:|---------:|--------:|:-----------:|
+| **montage_heatmap** | spline (Perrin) | **16.26** | **0.746** | **0.577** | 0.051 | +0.53 |
+| montage_leadfield | solución inversa | 18.70 | 0.623 | 0.442 | 0.181 | +0.26 |
+
+* **El modelo supera siempre a la proyección pura.** La ganancia es la
+  contribución del aprendizaje: la proyección analítica fija solo fija la
+  geometría; el autoencoder refina el resto del campo y la conversión entre
+  referencias.
+* `montage_heatmap` es mejor a pesar de que su proyección pura es la peor
+  (spline ve 0.05 vs leadfield 0.18): las **características suaves** del
+  spline son más fáciles de refinar que los modos de la solución inversa mal
+  condicionada (truncada a `C_s//3`).
+* La referencia **bipolar** sigue siendo la ruta más débil en ambas variantes
+  (es un operador local cuyo montaje fuente observa con otra cadena).
+* Interpretación: el RMSE de montaje **no es comparable 1:1** con el de las
+  variantes canónicas (entrada de 19 canales proyectados vs 64 canales). El
+  techo físico de estimar 64 desde 19 electrodos es la `ve_proy`; el modelo lo
+  sube a ~0.45-0.6.
+
+Detalle completo, metodología fiel y desglose por referencia en
+`docs/mapping_wip.md`; visualización con mapas de calor del cuero cabelludo en
+`notebooks/montage_leadfield.ipynb` y `notebooks/montage_heatmap.ipynb`.
