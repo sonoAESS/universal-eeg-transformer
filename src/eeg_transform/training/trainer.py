@@ -17,6 +17,18 @@ from ..models.universal_transformer import UniversalEEGTransformer
 log = get_logger(__name__)
 
 
+def is_montage_variant(cfg: EEGTransformConfig) -> bool:
+    """True si la variante consume un montaje fuente (``montage_*``)."""
+    return cfg.model.variant.startswith("montage_")
+
+
+def build_montage_inputs(cfg: EEGTransformConfig, ds: MultiReferenceDataset):
+    """Insume de montaje (observaciones fuente + proyección) para entrenar."""
+    from ..experiments.montage import build_montage_inputs as _build
+
+    return _build(ds, cfg)
+
+
 def build_tf_dataset(
     ds: MultiReferenceDataset,
     split: str,
@@ -26,25 +38,55 @@ def build_tf_dataset(
     buffer: int = 20_000,
     prefetch: int = 4,
     dtype: str = "float32",
+    sources: dict[str, dict[str, np.ndarray]] | None = None,
 ) -> tf.data.Dataset:
-    """Dataset de TF con los 4 montajes alineados como tupla de tensores."""
-    arrays = tuple(
-        ds.refs[k][ds.split_idx[split]].astype(dtype) for k in REFERENCE_KINDS
-    )
-    dset = tf.data.Dataset.from_tensor_slices(arrays)
+    """Dataset de TF con los 4 montajes alineados como tupla de tensores.
+
+    En modo montaje (``sources`` no nulo) cada elemento es la tupla
+    ``(dict_fuente, dict_objetivo)``: ``dict_fuente[k]`` son las
+    observaciones ``(n, C_s)`` del montaje fuente y ``dict_objetivo[k]`` las
+    referencias canónicas ``(n, C)``.
+    """
+    idx = ds.split_idx[split]
+    if sources is None:
+        arrays = tuple(
+            ds.refs[k][idx].astype(dtype) for k in REFERENCE_KINDS
+        )
+        dset = tf.data.Dataset.from_tensor_slices(arrays)
+        _n = arrays[0].shape[0]
+    else:
+        src_arrays = {
+            k: sources[split][k].astype(dtype) for k in REFERENCE_KINDS
+        }
+        tgt_arrays = {
+            k: ds.refs[k][idx].astype(dtype) for k in REFERENCE_KINDS
+        }
+        dset = tf.data.Dataset.from_tensor_slices((src_arrays, tgt_arrays))
+        _n = next(iter(src_arrays.values())).shape[0]
     if shuffle:
-        dset = dset.shuffle(min(buffer, arrays[0].shape[0]), seed=seed,
+        dset = dset.shuffle(min(buffer, _n), seed=seed,
                             reshuffle_each_iteration=True)
     dset = dset.repeat()
     return dset.batch(batch_size, drop_remainder=False).prefetch(prefetch)
 
 
-def build_model(cfg: EEGTransformConfig, n_channels: int) -> UniversalEEGTransformer:
-    """Instancia el modelo según la configuración."""
+def build_model(
+    cfg: EEGTransformConfig,
+    n_channels: int,
+    projection: np.ndarray | None = None,
+) -> UniversalEEGTransformer:
+    """Instancia el modelo según la configuración.
+
+    ``projection`` (matriz ``C_s -> C``) activa el **modo montaje**: las
+    entradas son observaciones del montaje fuente proyectadas al espacio
+    canónico antes del autoencoder (ver :mod:`models.universal_transformer`).
+    """
     model_cfg = cfg.model
     if model_cfg.latent_dim in (0, -1):
         model_cfg.latent_dim = n_channels
-    return UniversalEEGTransformer(n_channels=n_channels, model_cfg=model_cfg)
+    return UniversalEEGTransformer(
+        n_channels=n_channels, model_cfg=model_cfg, projection=projection
+    )
 
 
 class _History:
@@ -77,17 +119,24 @@ def train(
     cfg: EEGTransformConfig,
     force: bool = False,
 ) -> tuple[UniversalEEGTransformer, Any]:
-    """Entrena el transformador universal sobre el dataset multi-referencia."""
+    """Entrena el transformador universal sobre el dataset multi-referencia.
+
+    Con una variante ``montage_*`` entrena sobre las observaciones del montaje
+    fuente: proyecta cada entrada con la matriz fija ``P`` y aprende a estimar
+    las referencias canónicas desde **cualquier** configuración de electrodos.
+    """
     tcfg = cfg.training
     run_dir = Path(tcfg.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    montage = build_montage_inputs(cfg, ds) if is_montage_variant(cfg) else None
 
     checkpoint = run_dir / "best.weights.h5"
     history_csv = run_dir / "history.csv"
     if checkpoint.exists() and not force:
         log.info("Checkpoint previo detectado (%s) — reutilizando.", checkpoint)
         n = max(1, ds.n_channels)
-        model = build_model(cfg, n)
+        model = build_model(cfg, n, projection=montage.projection if montage else None)
         model.ensure_built()
         model.load_weights(str(checkpoint))
         history = load_history(history_csv)
@@ -101,7 +150,7 @@ def train(
     np.random.seed(tcfg.seed)
 
     n = max(1, ds.n_channels)
-    model = build_model(cfg, n)
+    model = build_model(cfg, n, projection=montage.projection if montage else None)
 
     # Pre-entrenamiento lineal: factorización empírica óptima de las rutas.
     # Sitúa las matrices efectivas cerca de las analíticas desde la época 0,
@@ -110,7 +159,15 @@ def train(
     if model.latent_dim == n:
         init_n = 20_000
         init_idx = ds.split_idx["train"][:init_n]
-        init_refs = {k: ds.refs[k][init_idx] for k in REFERENCE_KINDS}
+        if montage is None:
+            init_refs = {k: ds.refs[k][init_idx] for k in REFERENCE_KINDS}
+        else:
+            # El ancla del latente es unipolar proyectada al espacio canónico.
+            init_refs = {
+                k: (montage.src_refs["train"][k][:init_n] @ montage.projection)
+                .astype(np.float32)
+                for k in REFERENCE_KINDS
+            }
         model.init_from_data(init_refs)
         log.info("Inicialización lineal empírica desde %d muestras.", len(init_idx))
 
@@ -124,10 +181,12 @@ def train(
     train_ds = build_tf_dataset(
         ds, "train", tcfg.batch_size, shuffle=True, seed=tcfg.seed,
         buffer=tcfg.shuffle_buffer, prefetch=tcfg.prefetch, dtype=cfg.dataset.dtype,
+        sources=montage.src_refs if montage else None,
     )
     val_ds = build_tf_dataset(
         ds, "val", tcfg.batch_size, shuffle=False, prefetch=tcfg.prefetch,
         dtype=cfg.dataset.dtype,
+        sources=montage.src_refs if montage else None,
     )
 
     steps_per_epoch = max(1, len(ds.split_idx["train"]) // tcfg.batch_size)

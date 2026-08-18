@@ -69,6 +69,68 @@ MONTAGE_NAMES: dict[str, list[str]] = {
 }
 
 
+def resolve_montage(montage: str | list[str], ch_names: list[str]) -> list[str]:
+    """Resuelve un montaje (nombre estándar o lista de canales) a canales.
+
+    Acepta nombres conocidos (``10-20``, ``10-10``) o una lista explícita de
+    canales; descarta los canales que no existan en ``ch_names``.
+    """
+    if isinstance(montage, str):
+        keep = MONTAGE_NAMES.get(montage)
+        if keep is None:
+            raise ValueError(
+                f"Montaje desconocido '{montage}' (válidos: "
+                f"{list(MONTAGE_NAMES)} o una lista de canales)."
+            )
+        return keep
+    return [c for c in montage if c in ch_names]
+
+
+def build_montage_inputs(
+    ds: MultiReferenceDataset,
+    cfg: EEGTransformConfig,
+    splits: tuple[str, ...] = ("train", "val", "test"),
+) -> MontageInputs:
+    """Prepara las observaciones del montaje fuente y su proyección.
+
+    * Proyección fija ``P``: ``leadfield`` (solución inversa, SVD truncado a
+      ``n_components`` o automático ``C_s//3``) o ``spline`` (interpolación
+      esférica con suavizado adaptativo por la densidad del montaje).
+    * ``src_refs``: por split, las 4 referencias del montaje fuente
+      (metodología fiel, ver :func:`simulate_source_observation`).
+    """
+    mapping = cfg.mapping
+    keep = resolve_montage(mapping.montage, ds.ch_names)
+    _, src_pos, src_idx = select_subset(ds.ch_names, ds.ch_positions, keep=keep)
+    canon_pos = np.asarray(ds.ch_positions)
+    g_src = ds.leadfield.matrix[src_idx, :]
+
+    projection = build_projection(
+        mapping.method,
+        src_pos,
+        canon_pos,
+        g_src=g_src,
+        g_dst=ds.leadfield.matrix,
+        n_components=mapping.n_components,
+        smoothness=mapping.smoothness,
+        adaptive_smoothness=mapping.adaptive_smoothness,
+    )
+    src_refs = {
+        split: simulate_source_observation(ds, src_idx, split) for split in splits
+    }
+    log.info("Montaje fuente: %s (%d canales) via '%s'", mapping.montage,
+             len(keep), mapping.method)
+    return MontageInputs(
+        method=mapping.method,
+        montage=str(mapping.montage),
+        src_names=[ds.ch_names[i] for i in src_idx],
+        src_idx=src_idx,
+        src_positions=src_pos,
+        projection=projection,
+        src_refs=src_refs,
+    )
+
+
 @dataclass
 class MonteResult:
     """Resultados de reconstrucción de un montaje/método (promedio por ref)."""
@@ -81,6 +143,25 @@ class MonteResult:
     r: float
     ve: float
     route: str
+
+
+@dataclass
+class MontageInputs:
+    """Observaciones del montaje fuente + proyección al espacio canónico.
+
+    * ``src_refs[split][kind]`` : observación ``(n, C_s)`` de la referencia
+      ``kind`` desde el montaje fuente (las 4 referencias del propio montaje).
+    * ``projection``            : matriz fija ``(C_s, C)`` de proyección al
+      espacio canónico (solución inversa con lead field o spline/heatmap).
+    """
+
+    method: str
+    montage: str
+    src_names: list[str]
+    src_idx: np.ndarray
+    src_positions: np.ndarray
+    projection: np.ndarray
+    src_refs: dict[str, dict[str, np.ndarray]]
 
 
 def _source_operators(

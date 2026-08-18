@@ -75,6 +75,34 @@ class DatasetConfig:
     dtype: str = "float32"
 
 
+@dataclass
+class MappingConfig:
+    """Unificación de montajes: proyección de cualquier distribución de
+    electrodos al espacio canónico (usada por las variantes ``montage_*``).
+
+    * ``method``       : ``leadfield`` (solución inversa con el lead field
+      analítico), ``spline`` (interpolación esférica, estilo *topomapa* /
+      *heatmap* donde la actividad se ve como manchas) o ``nearest``.
+    * ``montage``      : configuración de electrodos de origen, p. ej.
+      ``10-20`` (19 canales) o ``10-10`` (39). Se estima desde **cualquier**
+      distribución de electrodos: también acepta una lista de canales.
+    * ``n_components`` : truncado SVD de la solución inversa (''leadfield'').
+      ``None`` = automático (``C_s // 3``, ver mapping).
+    * ``smoothness``   : regularización ridge base del spline.
+    * ``adaptive_smoothness``: si es verdadero, el suavizado crece cuanto
+      menos denso es el montaje de origen (más regularización a sparso).
+    * ``grid_px``      : resolución (px) de la malla del cuero cabelludo para
+      representar la actividad como un *heatmap* de manchas.
+    """
+
+    method: str = "leadfield"
+    montage: str = "10-20"
+    n_components: int | None = None
+    smoothness: float = 1e-5
+    adaptive_smoothness: bool = True
+    grid_px: int = 48
+
+
 # Variantes de arquitectura del transformador (ver models.universal_transformer).
 #   * ``free``     : autoencoder lineal libre (todas las matrices aprendidas).
 #   * ``group``    : decodificador = pseudo-inversa del encoder del mismo
@@ -82,7 +110,26 @@ class DatasetConfig:
 #                    (transitividad y auto-reconstrucción = proyector).
 #   * ``projected``: todas las matrices aprendidas anulan por construcción el
 #                    modo constante (físicamente válidas como referencias).
-MODEL_VARIANTS: tuple[str, ...] = ("free", "group", "projected", "soft_group")
+#   * ``montage_leadfield``: unificación de montajes con **solución inversa**:
+#                    las observaciones de un montaje de ``C_s`` electrodos
+#                    entran por un proyector fijo construido con el lead field
+#                    analítico (regularizado por SVD) y el autoencoder aprende
+#                    el refinamiento y la conversión a las 4 referencias
+#                    canónicas (ver mapping.leadfield_projection_matrix).
+#   * ``montage_heatmap`` : idem con interpolación esférica (spline/Perrin)
+#                    al espacio canónico, suavizada según la densidad del
+#                    montaje; visualmente equivale a un *topomapa* donde la
+#                    actividad aparece como manchas difusas.
+MODEL_VARIANTS: tuple[str, ...] = (
+    "free", "group", "projected", "soft_group",
+    "montage_leadfield", "montage_heatmap",
+)
+
+# Métodos de proyección entre montajes (ver mapping.build_projection).
+MAPPING_METHODS: tuple[str, ...] = ("spline", "leadfield", "nearest")
+
+# Montajes estándar conocidos (nombres usados por MappingConfig.montage).
+MAPPING_MONTAGES: tuple[str, ...] = ("10-20", "10-10")
 
 
 @dataclass
@@ -133,6 +180,7 @@ class EEGTransformConfig:
     data: DataConfig = field(default_factory=DataConfig)
     leadfield: LeadFieldConfig = field(default_factory=LeadFieldConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
+    mapping: MappingConfig = field(default_factory=MappingConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     evaluation: EvalConfig = field(default_factory=EvalConfig)
@@ -163,6 +211,7 @@ class EEGTransformConfig:
             data=_build(DataConfig, raw.get("data", {})),
             leadfield=_build(LeadFieldConfig, raw.get("leadfield", {})),
             dataset=_build(DatasetConfig, raw.get("dataset", {})),
+            mapping=_build(MappingConfig, raw.get("mapping", {})),
             model=_build(ModelConfig, raw.get("model", {})),
             training=_build(TrainingConfig, raw.get("training", {})),
             evaluation=_build(EvalConfig, raw.get("evaluation", {})),
@@ -192,6 +241,23 @@ class EEGTransformConfig:
                 f"model.variant debe ser una de {MODEL_VARIANTS}, "
                 f"no '{self.model.variant}'."
             )
+        if self.model.variant in ("montage_leadfield", "montage_heatmap"):
+            expected = (
+                "leadfield" if "leadfield" in self.model.variant else "spline"
+            )
+            if self.mapping.method != expected:
+                raise ValueError(
+                    f"La variante '{self.model.variant}' requiere "
+                    f"mapping.method == '{expected}', no "
+                    f"'{self.mapping.method}'."
+                )
+        if self.mapping.method not in MAPPING_METHODS:
+            raise ValueError(
+                f"mapping.method debe ser una de {MAPPING_METHODS}, "
+                f"no '{self.mapping.method}'."
+            )
+        if self.mapping.grid_px <= 0:
+            raise ValueError("mapping.grid_px debe ser > 0.")
         if self.model.variant == "group" and self.model.use_bias:
             raise ValueError("variant='group' requiere use_bias: false.")
         if self.model.variant == "group" and not (

@@ -108,6 +108,73 @@ def spherical_spline_matrix(
     return np.ascontiguousarray(m.T, dtype=np.float32)
 
 
+def density_smoothness(
+    src_positions: np.ndarray,
+    dst_positions: np.ndarray,
+    base_smoothness: float = 1e-5,
+) -> float:
+    """Suavizado del spline escalado por la densidad del montaje fuente.
+
+    Cuanto menos denso es el montaje de origen mayor es la distancia media
+    entre electrodos y más se difumina la actividad en manchas; la
+    regularización ridge del spline crece en consecuencia
+    (``base * C_dst / C_src``). Así el modelo se adapta por construcción a
+    distribuciones más o menos densas.
+    """
+    n_src = max(1, src_positions.shape[0])
+    n_dst = max(1, dst_positions.shape[0])
+    return float(base_smoothness) * (n_dst / n_src)
+
+
+def _project_to_disc(positions: np.ndarray) -> np.ndarray:
+    """Proyecta posiciones 3D sobre el disco unidad (vista central/topomapa).
+
+    Cada posición se normaliza a la esfera unitaria y se queda con sus dos
+    primeras coordenadas ``(x_hat, y_hat)`` (dentro del disco `x²+y² ≤ 1`),
+    coherente con la malla del cuero cabelludo de :func:`scalp_grid_matrix`.
+    """
+    p = _normalize(positions)
+    return p[:, :2]
+
+
+def scalp_grid_matrix(
+    src_positions: np.ndarray,
+    grid_px: int = 48,
+    order: int = 30,
+    smoothness: float = 1e-7,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Matriz de interpolación a una malla regular del cuero cabelludo.
+
+    Devuelve la matriz ``M`` (n_grid, C_s) que lleva potenciales de los
+    electrodos fuente a una cuadrícula 2D ``grid_px x grid_px`` (vista
+    central). La actividad interpolada se representa como un *heatmap* donde
+    cada máximo local es una "mancha" (la forma de un potencial distribuido
+    sobre el cuero cabelludo).
+
+    La malla vive en el disco unitario; cada punto se eleva a la esfera
+    (``Z = sqrt(1 - X² - Y²)``) para interpolar el campo esférico de forma
+    consistente con :func:`spherical_spline_matrix`.
+
+    Returns
+    -------
+    ``(matrix, valid_mask, centroids)`` con ``matrix`` de ``(n, C_s)``,
+    ``valid_mask`` booleano de ``n = grid_px²`` (True dentro del disco) y
+    ``centroids`` las coordenadas ``(X, Y)`` (en ``[-1, 1]``) de cada nodo.
+    """
+    x = np.linspace(-1.0, 1.0, grid_px)
+    gx, gy = np.meshgrid(x, x)
+    X = gx.ravel()
+    Y = gy.ravel()
+    valid = (X ** 2 + Y ** 2) <= 1.0
+    Z = np.sqrt(np.maximum(0.0, 1.0 - X[valid] ** 2 - Y[valid] ** 2))
+    grid_pts = np.stack([X[valid], Y[valid], Z], axis=1).astype(np.float64)
+    m = spherical_spline_matrix(src_positions, grid_pts, order=order,
+                                smoothness=smoothness)   # (C_s, n_valid)
+    full = np.zeros((grid_px * grid_px, m.shape[0]), dtype=np.float32)
+    full[valid] = m.T
+    return full, valid, np.stack([X, Y], axis=1)
+
+
 # ---------------------------------------------------------------------------
 # Proyección por lead field (solución inversa)
 # ---------------------------------------------------------------------------
@@ -221,13 +288,27 @@ def build_projection(
     g_src: np.ndarray | None = None,
     g_dst: np.ndarray | None = None,
     n_components: int | None = None,
+    smoothness: float | None = None,
+    adaptive_smoothness: bool = True,
 ) -> np.ndarray:
     """Construye la matriz de proyección ``src -> dst`` según el método.
 
-    ``n_components`` solo aplica a ``leadfield`` (truncado SVD).
+    * ``leadfield`` usa ``g_src``/``g_dst``; ``n_components`` trunca el SVD
+      (``None`` = automático ``C_s // 3``).
+    * ``spline`` usa ``smoothness``; si es ``None`` o ``adaptive_smoothness``
+      es verdadero, el suavizado se escala por la densidad del montaje fuente
+      (:func:`density_smoothness`).
     """
     if method == "spline":
-        return spherical_spline_matrix(src_positions, dst_positions)
+        if smoothness is None:
+            # Default: regularización ridge base escalada por densidad.
+            smoothness = density_smoothness(src_positions, dst_positions)
+        elif adaptive_smoothness:
+            smoothness = density_smoothness(
+                src_positions, dst_positions, base_smoothness=float(smoothness)
+            )
+        return spherical_spline_matrix(src_positions, dst_positions,
+                                       smoothness=smoothness)
     if method == "leadfield":
         if g_src is None or g_dst is None:
             raise ValueError("'leadfield' requiere g_src y g_dst.")

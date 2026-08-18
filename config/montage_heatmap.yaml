@@ -1,0 +1,69 @@
+# Variante montage_heatmap: unificación de montajes por MAPAS DE CALOR.
+# El transformador universal aprende a estimar las cuatro referencias canónicas
+# (64 canales) desde las observaciones de un montaje 10-20 (19 electrodos)
+# proyectadas con interpolación esférica (spline/Perrin): la actividad se
+# representa como manchas difusas sobre el cuero cabelludo, suavizadas según la
+# densidad del montaje (ver mapping.density_smoothness).
+
+out_dir: runs/montage_heatmap
+
+data:
+  subjects: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  runs: [1, 2]
+  bandpass: [1.0, 45.0]
+  notch: []
+  unipolar_ref_ch: "Cz"
+  original_reference: "left_mastoid"
+  artifact_z_thresh: 6.0
+  bad_channel_z_thresh: 4.0
+  n_jobs: 1
+
+leadfield:
+  head_radius: 0.09
+  rel_radii: [0.87, 0.9, 0.97, 1.0]
+  sigmas: [0.33, 1.0, 0.0042, 0.33]
+  brain_radius: 0.078
+  src_grid_mm: 10.0
+
+dataset:
+  cache_dir: data/processed
+  split_mode: block
+  test_frac: 0.2
+  val_frac: 0.2
+  seed: 42
+  max_samples_per_subject: 60000
+  dtype: float32
+
+mapping:
+  method: spline           # interpolación esférica (Perrin), estilo heatmap
+  montage: "10-20"         # configuración de electrodos de origen (19 canales)
+  n_components: null
+  smoothness: 1.0e-5       # ridge base; se escala con la densidad del montaje
+  adaptive_smoothness: true
+  grid_px: 48
+
+model:
+  latent_dim: 0            # 0 = igual a los canales canónicos (64)
+  use_bias: false
+  kernel_regularizer_l2: 1.0e-6
+  optimizer: adam
+  learning_rate: 1.0e-3
+  variant: montage_heatmap
+
+training:
+  epochs: 60
+  batch_size: 1024
+  early_stop_patience: 10
+  reduce_lr_patience: 5
+  reduce_lr_factor: 0.5
+  min_lr: 1.0e-5
+  shuffle_buffer: 20000
+  prefetch: 4
+  run_dir: runs/montage_heatmap
+  log_file: runs/montage_heatmap/train.log
+  save_best_only: true
+  seed: 42
+
+evaluation:
+  n_plot_samples: 400
+  plot_channel: "Cz"

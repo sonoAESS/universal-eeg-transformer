@@ -160,9 +160,23 @@ class _CenteredDense(layers.Layer):
 
 
 class UniversalEEGTransformer(tf.keras.Model):
-    """Autoencoder lineal multientrada/multisalida para referencias de EEG."""
+    """Autoencoder lineal multientrada/multisalida para referencias de EEG.
 
-    def __init__(self, n_channels: int, model_cfg: ModelConfig | None = None, **kwargs):
+    En modo **montaje** (``projection`` no nula) el modelo unifica grabaciones
+    con cualquier configuración de electrodos: cada entrada del montaje fuente
+    ``X_src (n, C_s)`` se proyecta al espacio canónico con la matriz fija
+    ``P (C_s, C)`` (solución inversa con el lead field o spline/heatmap, ver
+    :mod:`mapping`) y el autoencoder lineal aprende el refinamiento y la
+    conversión entre las cuatro referencias canónicas ``(n, C)``.
+    """
+
+    def __init__(
+        self,
+        n_channels: int,
+        model_cfg: ModelConfig | None = None,
+        projection: np.ndarray | None = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         model_cfg = model_cfg or ModelConfig()
         self.n_channels = n_channels
@@ -172,6 +186,13 @@ class UniversalEEGTransformer(tf.keras.Model):
         self.variant = (
             model_cfg.variant if model_cfg.variant in MODEL_VARIANTS
             else VARIANT_FREE
+        )
+        # Proyección fija de montaje C_s -> C_canónica (None = modo canónico).
+        self.projection = (
+            np.asarray(projection, dtype=np.float32) if projection is not None else None
+        )
+        self.n_input_channels = (
+            self.projection.shape[0] if self.projection is not None else n_channels
         )
 
         regularizer = (
@@ -387,6 +408,9 @@ class UniversalEEGTransformer(tf.keras.Model):
         return self._predict_from(inputs, source)
 
     def _predict_from(self, x: tf.Tensor, source: str) -> Dict[str, tf.Tensor]:
+        if self.projection is not None:
+            # Proyección fija del montaje fuente al espacio canónico (C_s -> C).
+            x = tf.matmul(tf.cast(x, tf.float32), tf.constant(self.projection))
         z = self.encode(x, source)
         return {d: self.decode(z, d) for d in self.kinds}
 
@@ -409,8 +433,11 @@ class UniversalEEGTransformer(tf.keras.Model):
     def transfer_matrices(self) -> Dict[Tuple[str, str], np.ndarray]:
         """Devuelve ``A_{s->d}`` para cada ruta (C x C), según la variante.
 
-        * ``free``/``projected``: ``W_enc^s @ W_dec^d``.
+        * ``free``/``projected``/``soft_group``: ``W_enc^s @ W_dec^d``.
         * ``group``: ``W_enc^s @ pinv(W_enc^d)``.
+        * **modo montaje**: ``P @ W_enc^s @ W_dec^d`` con ``P`` la proyección
+          fija ``C_s -> C``; cada matriz mapea la observación del montaje
+          fuente a los canales canónicos ``(C_s, C)``.
         """
         enc = {k: self._effective_kernel(self.encoders[k]) for k in self.kinds}
         dec = {k: self._effective_kernel(self.decoders[k]) for k in self.kinds}
@@ -418,9 +445,12 @@ class UniversalEEGTransformer(tf.keras.Model):
         for s in self.kinds:
             for d in self.kinds:
                 if self.variant == VARIANT_GROUP:
-                    out[(s, d)] = enc[s] @ np.linalg.pinv(enc[d], rcond=1e-8)
+                    core = enc[s] @ np.linalg.pinv(enc[d], rcond=1e-8)
                 else:
-                    out[(s, d)] = enc[s] @ dec[d]
+                    core = enc[s] @ dec[d]
+                if self.projection is not None:
+                    core = np.float64(self.projection) @ core  # (C_s, C)
+                out[(s, d)] = core
         return out
 
     def composition_error(self) -> Dict[Tuple[str, str, str], float]:
@@ -429,7 +459,14 @@ class UniversalEEGTransformer(tf.keras.Model):
         Mide ``||P(A_{s->d} A_{d->u} - A_{s->u})P||_F / ||P A_{s->u} P||_F``
         con ``P`` el proyector de centrado. Es 0 exacto para la variante
         ``group`` y ``~1`` para el encadenado analítico ``T_d pinv(T_s)``.
+
+        En **modo montaje** las matrices ``A`` mapean ``C_s -> C`` y la
+        composición entre rutas no está definida en el mismo espacio; se
+        devuelve un dict vacío (las métricas de montaje usan la reconstrucción
+        directa).
         """
+        if self.projection is not None:
+            return {}
         C = self.n_channels
         p = np.eye(C) - np.ones((C, C)) / C
         mats = self.transfer_matrices()
@@ -455,37 +492,64 @@ class UniversalEEGTransformer(tf.keras.Model):
         p = (y_pred - mean) / std
         return tf.reduce_mean(tf.math.square(t - p))
 
-    def _route_losses(self, refs: Dict[str, tf.Tensor]):
-        """Calcula las 16 pérdidas de ruta (dict origen -> {dest: loss})."""
+    def _route_losses(self, sources, targets):
+        """Calcula las 16 pérdidas de ruta (dict origen -> {dest: loss}).
+
+        ``sources`` y ``targets`` son dicts por referencia: en modo canónico
+        coinciden; en modo montaje ``sources[k]`` es la observación del
+        montaje fuente ``(n, C_s)`` y ``targets[d]`` la referencia canónica
+        ``(n, C)``.
+        """
         route_losses: Dict[str, Dict[str, tf.Tensor]] = {}
         for s in self.kinds:
-            preds = self._predict_from(refs[s], s)
+            preds = self._predict_from(sources[s], s)
             route_losses[s] = {
-                d: self._zscore_loss(refs[d], preds[d]) for d in self.kinds
+                d: self._zscore_loss(targets[d], preds[d]) for d in self.kinds
             }
         return route_losses
 
-    def _real_mse(self, refs: Dict[str, tf.Tensor]):
+    def _real_mse(self, sources, targets):
         """MSE promediado en unidades reales (V^2)."""
         total, count = 0.0, 0
         for s in self.kinds:
-            preds = self._predict_from(refs[s], s)
+            preds = self._predict_from(sources[s], s)
             for d in self.kinds:
-                total += losses.MSE(refs[d], preds[d])
+                total += losses.MSE(targets[d], preds[d])
                 count += 1
         return total / count
+
+    def _split(self, data):
+        """Separa fuente y objetivo: modo canónico (mismos arrays) o montaje.
+
+        En modo montaje el dataset entrega la tupla ``(sources, targets)`` con
+        ``sources[k]`` de ``(n, C_s)`` (observaciones del montaje fuente) y
+        ``targets[d]`` de ``(n, C)`` (referencias canónicas).
+        """
+        if self.projection is None:
+            refs = self._unpack(data)
+            return refs, refs
+        if isinstance(data, (tuple, list)) and len(data) == 2 and isinstance(data[0], dict) and isinstance(data[1], dict):
+            return data[0], data[1]
+        if isinstance(data, (tuple, list)) and len(data) and isinstance(data[0], (tuple, list)):
+            seq = data[0]
+            if len(seq) == 2 and isinstance(seq[0], dict) and isinstance(seq[1], dict):
+                return seq[0], seq[1]
+        raise TypeError(
+            "Modo montaje: se esperaba (sources, targets) como dos dicts "
+            "de referencias."
+        )
 
     # ------------------------------------------------------------------
     # Bucles de entrenamiento/validación
     # ------------------------------------------------------------------
     def train_step(self, data):
-        refs = self._unpack(data)
+        sources, targets = self._split(data)
         with tf.GradientTape() as tape:
-            route_losses = self._route_losses(refs)
+            route_losses = self._route_losses(sources, targets)
             total = tf.reduce_sum(
                 tf.stack([tf.stack(list(r.values())) for r in route_losses.values()])
             )
-            if self.variant == VARIANT_SOFT_GROUP:
+            if self.variant == VARIANT_SOFT_GROUP and self.projection is None:
                 total = total + self.model_cfg.comp_penalty_weight * self._soft_group_penalty()
             if self.losses:
                 total = total + tf.add_n(self.losses)  # regularizaciones L2
@@ -494,7 +558,7 @@ class UniversalEEGTransformer(tf.keras.Model):
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
 
         self.loss_tracker.update_state(total / (len(self.kinds) ** 2))
-        self.mse_tracker.update_state(self._real_mse(refs))
+        self.mse_tracker.update_state(self._real_mse(sources, targets))
         return {
             "loss": self.loss_tracker.result(),
             "loss_estandarizada": self.loss_tracker.result(),
@@ -502,15 +566,15 @@ class UniversalEEGTransformer(tf.keras.Model):
         }
 
     def test_step(self, data):
-        refs = self._unpack(data)
-        route_losses = self._route_losses(refs)
+        sources, targets = self._split(data)
+        route_losses = self._route_losses(sources, targets)
         total = tf.reduce_sum(
             tf.stack([tf.stack(list(r.values())) for r in route_losses.values()])
         )
-        if self.variant == VARIANT_SOFT_GROUP:
+        if self.variant == VARIANT_SOFT_GROUP and self.projection is None:
             total = total + self.model_cfg.comp_penalty_weight * self._soft_group_penalty()
         self.loss_tracker.update_state(total / (len(self.kinds) ** 2))
-        self.mse_tracker.update_state(self._real_mse(refs))
+        self.mse_tracker.update_state(self._real_mse(sources, targets))
         return {
             "loss": self.loss_tracker.result(),
             "loss_estandarizada": self.loss_tracker.result(),
@@ -539,11 +603,17 @@ class UniversalEEGTransformer(tf.keras.Model):
             "latent_dim": self.latent_dim,
             "kinds": self.kinds,
             "model_cfg": dataclasses.asdict(self.model_cfg),
+            "projection": (self.projection.tolist()
+                           if self.projection is not None else None),
         }
 
     @classmethod
     def from_config(cls, config, custom_objects=None):
+        projection = config.get("projection")
+        if projection is not None:
+            projection = np.asarray(projection, dtype=np.float32)
         return cls(
             n_channels=config["n_channels"],
             model_cfg=ModelConfig(**config["model_cfg"]),
+            projection=projection,
         )
