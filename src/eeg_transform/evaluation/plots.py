@@ -1,4 +1,9 @@
-"""Figuras de evaluación: curvas de aprendizaje, matrices de error y trazas."""
+"""Figuras de evaluación: curvas de aprendizaje, matrices de error y trazas.
+
+Cada figura se construye con ``*_fig`` (devuelve ``matplotlib.figure.Figure``,
+reutilizable para mostrarla inline en notebooks) y se guarda con las
+funciones ``plot_*`` del CLI a ``runs/<nombre>/figs/``.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +29,18 @@ KIND_LABELS = {
     "rest": "REST",
 }
 
+# El CLI usa backend Agg (headless); los notebooks pueden cambiar a inline
+# SIN recargar el módulo llamando a `set_plot_backend("inline")`.
+_PLOT_BACKEND = None
+
+
+def set_plot_backend(backend: str) -> None:
+    """Cambia el backend de matplotlib en caliente (p. ej. 'inline')."""
+    global _PLOT_BACKEND
+    if backend != _PLOT_BACKEND:
+        matplotlib.use(backend, force=True)
+        _PLOT_BACKEND = backend
+
 
 def _save(fig, run_dir: Path, name: str) -> None:
     out = run_dir / "figs"
@@ -33,7 +50,8 @@ def _save(fig, run_dir: Path, name: str) -> None:
     log.info("Figura guardada: %s", out / name)
 
 
-def plot_learning_curves(history_csv: str | Path, run_dir: Path) -> None:
+def learning_curves_fig(history_csv: str | Path) -> plt.Figure:
+    """Curvas de entrenamiento (pérdida estandarizada y MSE real)."""
     df = pd.read_csv(history_csv)
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
     axes[0].plot(df["loss_estandarizada"], label="train", color="rebeccapurple", lw=2)
@@ -52,14 +70,12 @@ def plot_learning_curves(history_csv: str | Path, run_dir: Path) -> None:
         axes[1].grid(alpha=0.4)
     fig.suptitle("Curvas de entrenamiento")
     fig.tight_layout()
-    _save(fig, run_dir, "learning.png")
+    return fig
 
 
-def plot_heatmap(metrics_df: pd.DataFrame, value_col: str, title: str,
-                 run_dir: Path, fname: str) -> None:
-    table = pd.DataFrame(
-        index=KINDS, columns=KINDS, dtype=float
-    )
+def heatmap_fig(metrics_df: pd.DataFrame, value_col: str, title: str) -> plt.Figure:
+    """Heatmap log10 de una métrica por ruta origen→destino."""
+    table = pd.DataFrame(index=KINDS, columns=KINDS, dtype=float)
     for _, row in metrics_df.iterrows():
         table.loc[row["origen"], row["destino"]] = row[value_col]
     fig, ax = plt.subplots(figsize=(7, 6))
@@ -74,23 +90,15 @@ def plot_heatmap(metrics_df: pd.DataFrame, value_col: str, title: str,
                     ha="center", va="center", color="white", fontsize=8)
     fig.colorbar(im, ax=ax, label="log10(valor)")
     fig.tight_layout()
-    _save(fig, run_dir, fname)
+    return fig
 
 
-def plot_traces(
-    model,
-    ds,
-    split: str,
-    channel: str,
-    n_samples: int,
-    run_dir: Path,
-) -> None:
+def traces_fig(model, ds, split: str, channel: str, n_samples: int) -> plt.Figure:
     """Trazas reales vs predichas para las rutas cruzadas más relevantes."""
     ch = ds.ch_names.index(channel)
     idx = ds.split_idx[split][:n_samples]
     refs = {k: ds.refs[k][idx] for k in KINDS}
 
-    chart = {"unipolar": "car", "bipolar": "rest", "car": "rest"}
     rows, cols = 2, 3
     fig, axes = plt.subplots(rows, cols, figsize=(17, 7), sharex=True)
     routes = [("unipolar", "rest"), ("bipolar", "rest"), ("car", "rest"),
@@ -113,4 +121,21 @@ def plot_traces(
     axes[0, 0].legend()
     fig.suptitle(f"Canal {channel}: señales reales y predichas (test)")
     fig.tight_layout()
-    _save(fig, run_dir, "traces.png")
+    return fig
+
+
+def plot_learning_curves(history_csv: str | Path, run_dir: Path) -> None:
+    _save(learning_curves_fig(history_csv), run_dir, "learning.png")
+
+
+def plot_heatmap(
+    metrics_df: pd.DataFrame, value_col: str, title: str,
+    run_dir: Path, fname: str,
+) -> None:
+    _save(heatmap_fig(metrics_df, value_col, title), run_dir, fname)
+
+
+def plot_traces(model, ds, split: str, channel: str, n_samples: int,
+                run_dir: Path) -> None:
+    _save(traces_fig(model, ds, split, channel, n_samples), run_dir,
+          "traces.png")

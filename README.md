@@ -75,6 +75,37 @@ eeg-transform -c config/*.yaml pipeline         # build + train + eval
 eeg-transform compare runs/projected runs/soft_group runs/wide   # tabla comparativa de ejecuciones
 ```
 
+## Notebooks por variante
+
+Cada variante tiene un **notebook autocontenido** en `notebooks/` que explica la
+metodología y la arquitectura (markdown), carga el dataset cacheado, entrena o
+**reutiliza el checkpoint** existente, y muestra las mismas visualizaciones
+(curvas de aprendizaje, heatmap de RMSE por ruta, trazas reales vs predichas)
+directamente en las celdas. Reutilizan el checkpoint por defecto (segundos);
+pon `FORCE = True` solo para reentrenar desde cero.
+
+| Notebook | Configuración | Variante |
+|---|---|---|
+| `notebooks/free.ipynb` | `config/default.yaml` | autoencoder libre |
+| `notebooks/group.ipynb` | `config/group.yaml` | estructura de grupo exacta |
+| `notebooks/projected.ipynb` | `config/projected.yaml` | anulación del modo constante |
+| `notebooks/soft_group.ipynb` | `config/soft_group.yaml` | grupo suave por regularización |
+| `notebooks/wide.ipynb` | `config/wide.yaml` | free con latente 128 |
+| `notebooks/bottleneck.ipynb` | `config/bottleneck.yaml` | free con latente 32 |
+
+Para abrirlos y ejecutarlos con el entorno del proyecto:
+
+```bash
+jupyter notebook notebooks/   # kernel Python 3 del entorno/ (ipykernel instalado)
+```
+
+Los notebooks se generan desde `notebooks/generate_notebooks.py` (nbformat);
+para regenerarlos tras cambios en la lógica:
+
+```bash
+PYTHONPATH=src entorno/bin/python notebooks/generate_notebooks.py
+```
+
 Variantes disponibles en `config/` (vía `model.variant`): `default.yaml`
 (`free`), `group.yaml`, `projected.yaml`, `soft_group.yaml`, y exploraciones
 de latente `wide.yaml` (128) / `bottleneck.yaml` (32). Resultados:
@@ -90,6 +121,14 @@ de latente `wide.yaml` (128) / `bottleneck.yaml` (32). Resultados:
 ├── pyproject.toml               # dependencias (uv/pip instal ")
 ├── uv.lock
 ├── config/default.yaml          # configuración por defecto (variante free)
+├── notebooks/                   # un notebook por variante (metodología + resultados)
+│   ├── generate_notebooks.py    # genera/actualiza los notebooks (nbformat)
+│   ├── free.ipynb               # autoencoder libre
+│   ├── group.ipynb              # estructura de grupo exacta
+│   ├── projected.ipynb          # anulación del modo constante
+│   ├── soft_group.ipynb         # grupo suave por regularización
+│   ├── wide.ipynb               # latente 128
+│   └── bottleneck.ipynb         # latente 32
 ├── docs/
 │   ├── model_variants.md        # descripción de las variantes de arquitectura
 │   └── results_comparison.md    # tabla comparativa y análisis (sujetos 1–12)
@@ -102,6 +141,7 @@ de latente `wide.yaml` (128) / `bottleneck.yaml` (32). Resultados:
 │   ├── models/universal_transformer.py   # autoencoder lineal All-to-All
 │   ├── training/trainer.py      # bucles/callbacks TF
 │   ├── evaluation/{metrics,plots}.py
+│   ├── nb.py                    # helpers compartidos para los notebooks
 │   └── cli.py                   # comandos build/train/eval/pipeline
 └── tests/
     ├── test_physics.py          # propiedades de las referencias y REST

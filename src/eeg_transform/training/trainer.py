@@ -47,6 +47,31 @@ def build_model(cfg: EEGTransformConfig, n_channels: int) -> UniversalEEGTransfo
     return UniversalEEGTransformer(n_channels=n_channels, model_cfg=model_cfg)
 
 
+class _History:
+    """Contenedor mínimo con la API de ``keras.callbacks.History``."""
+
+    def __init__(self, history: dict):
+        self.history = history
+
+
+def load_history(history_csv: str | Path) -> _History:
+    """Reconstruye un objeto historia desde el CSV de entrenamiento."""
+    import pandas as pd
+
+    if not Path(history_csv).exists():
+        return _History({})
+    df = pd.read_csv(history_csv)
+    # Keras escribe métricas como cadenas (p. ej. "'0.123'"); se normalizan
+    # a float y se guarda el diccionario {métrica: lista por época}.
+    history: dict[str, list[float]] = {}
+    for col in df.columns:
+        try:
+            history[col] = list(pd.to_numeric(df[col], errors="coerce").fillna(0.0))
+        except Exception:
+            history[col] = list(df[col])
+    return _History(history)
+
+
 def train(
     ds: MultiReferenceDataset,
     cfg: EEGTransformConfig,
@@ -61,7 +86,13 @@ def train(
     history_csv = run_dir / "history.csv"
     if checkpoint.exists() and not force:
         log.info("Checkpoint previo detectado (%s) — reutilizando.", checkpoint)
-    elif history_csv.exists():
+        n = max(1, ds.n_channels)
+        model = build_model(cfg, n)
+        model.ensure_built()
+        model.load_weights(str(checkpoint))
+        history = load_history(history_csv)
+        return model, history
+    if history_csv.exists():
         # Un reentrenamiento con --force debe partir de un log limpio (evita
         # concatenar épocas de corridas distintas en un mismo CSV).
         history_csv.unlink()

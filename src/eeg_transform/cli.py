@@ -5,6 +5,7 @@ Uso:
     eeg-transform train   [--config config/default.yaml] [--force]
     eeg-transform eval    [--config config/default.yaml]
     eeg-transform pipeline[--config config/default.yaml] [--force]
+    eeg-transform montage [--config config/default.yaml] [--montages 10-20,10-10]
 """
 
 from __future__ import annotations
@@ -167,6 +168,12 @@ def cmd_pipeline(cfg, force: bool) -> None:
     cmd_eval(cfg)
 
 
+def cmd_montage(cfg, montages: list[str] | None) -> None:
+    from .experiments.montage import run_cmd
+
+    run_cmd(cfg, montages)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="eeg-transform",
@@ -189,6 +196,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="Directorios de ejecución (p. ej. runs/default).")
     p_pipe = sub.add_parser("pipeline", help="build + train + eval.")
     p_pipe.add_argument("--force", action="store_true")
+    p_mon = sub.add_parser(
+        "montage",
+        help="Evalúa la reconstrucción de montajes al espacio canónico.",
+    )
+    p_mon.add_argument(
+        "--montages", default=None,
+        help="Lista separada por comas de montajes (p. ej. 10-20,10-10).",
+    )
 
     args = parser.parse_args(argv)
 
@@ -205,6 +220,12 @@ def main(argv: list[str] | None = None) -> int:
         cmd_compare(args.runs)
     elif args.command == "pipeline":
         cmd_pipeline(cfg, args.force)
+    elif args.command == "montage":
+        montages = (
+            [m.strip() for m in args.montages.split(",")]
+            if args.montages else None
+        )
+        cmd_montage(cfg, montages)
     return 0
 
 
