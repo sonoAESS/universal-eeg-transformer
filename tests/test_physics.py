@@ -5,6 +5,13 @@ from __future__ import annotations
 import numpy as np
 
 from eeg_transform.leadfield import compute_lead_field
+from eeg_transform.mapping import (
+    _legendre_kernel,
+    leadfield_projection_matrix,
+    nearest_neighbor_matrix,
+    select_subset,
+    spherical_spline_matrix,
+)
 from eeg_transform.references import (
     bipolar_chain_matrix,
     car_matrix,
@@ -165,3 +172,81 @@ def test_rest_matrix_composes_with_car():
     X_uni = X - X[:, [3]]
     X_car = X - X.mean(axis=1, keepdims=True)
     assert np.allclose(X_uni @ T_rest, X_car @ T_rest, atol=1e-14)
+
+
+def _synthetic_forward(seed=0):
+    """Matrices de carga fuente->sensor (lead field) con pocas fuentes.
+
+    En un problema real solo un número reducido de fuentes es observable
+    desde ``Cs`` sensores; usar ``G`` aleatorio de rango completo invalida
+    la prueba (el subespacio no observable contamina la recuperación).
+    Devuelve ``(h_src, h_dst)`` con ``h_src`` de ``(6, K)`` y ``h_dst`` de
+    ``(10, K)``.
+    """
+    rng = np.random.default_rng(seed)
+    k = 4
+    h_src = rng.normal(size=(6, k))
+    h_dst = rng.normal(size=(10, k))
+    return h_src, h_dst
+
+
+def test_leadfield_projection_recovers_dest_synthetic():
+    """Sobre datos sintéticos sin ruido la proyección por lead field recupera
+    los potenciales destino (valida la fórmula del problema inverso)."""
+    h_src, h_dst = _synthetic_forward()
+    n = h_src.shape[0]
+    # W = I - 11^T/n anula el modo constante: rango efectivo n-1
+    P = leadfield_projection_matrix(h_src, h_dst, n_components=n - 1)
+
+    rng = np.random.default_rng(2)
+    q = rng.normal(size=(h_dst.shape[1], 500))
+    v_src = h_src @ q          # (6, 500) al infinito
+    v_dst = h_dst @ q          # (10, 500)
+    pred = v_src.T @ P         # (500, 10)
+    pred_c = pred - pred.mean(1, keepdims=True)
+    dst_c = v_dst.T - v_dst.T.mean(1, keepdims=True)
+    ve = 1.0 - np.sum((pred_c - dst_c) ** 2) / (np.sum(dst_c ** 2) + 1e-15)
+    assert ve > 0.99, f"ve sintético demasiado bajo: {ve:.4f}"
+
+
+def test_leadfield_projection_shapes_and_nan():
+    """La matriz de proyección tiene la forma esperada y es finita."""
+    g_src, g_dst = _synthetic_forward(seed=3)
+    P = leadfield_projection_matrix(g_src, g_dst, n_components=3)
+    assert P.shape == (g_src.shape[0], g_dst.shape[0])
+    assert np.isfinite(P).all()
+    assert np.isfinite(leadfield_projection_matrix(g_src, g_dst)).all()
+
+
+def test_spline_projection_interpolates_smooth_field():
+    """La interpolación esférica es un interpolador: recupera un campo suave
+    (núcleo de Legendre) en las posiciones fuente y preserva la media."""
+    pos = _sphere_positions(12, seed=4)
+    M = spherical_spline_matrix(pos, pos)
+    assert M.shape == (12, 12)
+    assert np.allclose(M.sum(axis=1), 1.0, atol=1e-4)   # constante preservada
+
+    t = np.array([[0.0, 0.09, 0.0]])
+    field = _legendre_kernel((_sphere_positions(12, seed=4) @ t.T / 0.09).ravel())
+    rec = M @ field
+    assert np.corrcoef(field, rec)[0, 1] > 0.99
+
+
+def test_nearest_neighbor_assignment():
+    """El vecino más cercano asigna cada destino a un único electrodo fuente."""
+    src = _sphere_positions(5, seed=6)
+    dst = _sphere_positions(3, seed=7)
+    M = nearest_neighbor_matrix(src, dst)
+    assert M.shape == (5, 3)
+    assert np.allclose(M.sum(axis=0), 1.0)          # cada destino con un origen
+    assert set(np.unique(M)) <= {0.0, 1.0}          # asignación binaria
+
+
+def test_select_subset_keeps_10_20():
+    names = [f"c{i}" for i in range(64)]
+    pos = _sphere_positions(64, seed=8)
+    keep = ["c5", "c20", "c63"]
+    sub_names, sub_pos, idx = select_subset(names, pos, keep=keep)
+    assert sub_names == keep
+    assert list(idx) == [5, 20, 63]
+    assert sub_pos.shape == (3, 3)
