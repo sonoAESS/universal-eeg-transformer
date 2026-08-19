@@ -94,11 +94,21 @@ pon `FORCE = True` solo para reentrenar desde cero.
 | `notebooks/bottleneck.ipynb` | `config/bottleneck.yaml` | free con latente 32 |
 | `notebooks/montage_leadfield.ipynb` | `config/montage_leadfield.yaml` | unificación por solución inversa (lead field) |
 | `notebooks/montage_heatmap.ipynb` | `config/montage_heatmap.yaml` | unificación por mapas de calor (spline) |
+| `notebooks/multi_montage.ipynb` | `config/multi_montage.yaml` | entrenamiento conjunto y balanceado sobre 19/64/128/256 electrodos |
 
 Los notebooks de montaje estiman las 4 referencias canónicas (64 canales) desde
 **cualquier configuración de electrodos** (p. ej. 10-20, 19 canales) y muestran
 la actividad como **mapas de calor del cuero cabelludo** (electrodos → manchas):
 observación del montaje fuente → proyección analítica → modelo → verdad canónica.
+
+El de `multi_montage` entrena **un solo modelo** que acepta grabaciones en
+cualquiera de las configuraciones `10-20` (19 ch), el canónico (64 ch) y los
+densos simulados `dense-128`/`dense-256` (mismo campo escalar REST interpolado)
+y predice, **en esa misma configuración**, las medidas con otra referencia.
+Las configuraciones están **balanceadas por construcción** (mismas muestras por
+lote), la predicción es intra-configuración (`C_s → C_s`) y la evaluación se
+compara contra la línea base analítica `T_d @ pinv(T_s)` del propio montaje
+(columnas `*_ana`). Física y métricas en `docs/guia_conceptual.md`.
 
 Para abrirlos y ejecutarlos con el entorno del proyecto:
 
@@ -115,9 +125,12 @@ PYTHONPATH=src entorno/bin/python notebooks/generate_notebooks.py
 
 Variantes disponibles en `config/` (vía `model.variant`): `default.yaml`
 (`free`), `group.yaml`, `projected.yaml`, `soft_group.yaml`, y exploraciones
-de latente `wide.yaml` (128) / `bottleneck.yaml` (32), y las variantes de
-**unificación de montajes** `montage_leadfield.yaml` / `montage_heatmap.yaml`.
-Resultados: `docs/results_comparison.md` y `docs/mapping_wip.md`.
+de latente `wide.yaml` (128) / `bottleneck.yaml` (32), las variantes de
+**unificación de montajes** `montage_leadfield.yaml` / `montage_heatmap.yaml`,
+y `multi_montage.yaml` (entrenamiento conjunto y balanceado sobre varias
+configuraciones de electrodos a la vez).
+Resultados: `docs/results_comparison.md`, `docs/mapping_wip.md` y
+`docs/guia_conceptual.md`.
 
 * `build`: descarga los sujetos/corridas indicados, filtra (bandpass y notch), marca artefactos y canales malos por MAD z-score, revisa la referencia del dato original (`original_reference`) y construye las 4 referencias alineadas (unipolar, bipolar, CAR, REST), guardando `data/processed/dataset_{mode}_{subjects}.npz` y `*_leadfield.npz`. Splits por bloques temporales (`block`) o por sujeto (`subject`).
 * `train`: escribe checkpoints en `runs/<nombre>/` (`best.weights.h5`, `model.keras`, `history.csv`).
@@ -138,10 +151,12 @@ Resultados: `docs/results_comparison.md` y `docs/mapping_wip.md`.
 │   ├── wide.ipynb               # latente 128
 │   ├── bottleneck.ipynb         # latente 32
 │   ├── montage_leadfield.ipynb  # unificación por solución inversa (lead field)
-│   └── montage_heatmap.ipynb    # unificación por mapas de calor (spline)
+│   ├── montage_heatmap.ipynb    # unificación por mapas de calor (spline)
+│   └── multi_montage.ipynb      # 19/64/128/256 electrodos balanceados
 ├── docs/
 │   ├── model_variants.md        # descripción de las variantes de arquitectura
 │   ├── mapping_wip.md           # unificación de montajes (WIP → resultados)
+│   ├── guia_conceptual.md       # física, métricas y arquitectura (conceptos)
 │   └── results_comparison.md    # tabla comparativa y análisis (sujetos 1–12)
 ├── src/eeg_transform/
 │   ├── config.py                # dataclasses + carga/validación YAML
@@ -151,14 +166,18 @@ Resultados: `docs/results_comparison.md` y `docs/mapping_wip.md`.
 │   ├── data/loader.py           # descarga eegbci y preprocesado
 │   ├── data/dataset.py          # dataset multi-referencia + splits + caché
 │   ├── models/universal_transformer.py   # autoencoder lineal All-to-All (+ modo montaje)
+│   ├── models/multi_montage.py  # autoencoder multi-configuración (P_s/Q_s fijos)
 │   ├── training/trainer.py      # bucles/callbacks TF
 │   ├── evaluation/{metrics,plots}.py
 │   ├── experiments/montage.py   # experimento de reconstrucción de montajes
+│   ├── experiments/multi.py     # datos balanceados de multi-configuración
 │   ├── nb.py                    # helpers compartidos para los notebooks
 │   └── cli.py                   # comandos build/train/eval/pipeline/montage
 └── tests/
     ├── test_physics.py          # propiedades de las referencias y REST
     ├── test_config_ds.py        # config y dataset
+    ├── test_montage.py          # proyección/modo montaje
+    ├── test_multi.py            # generador y modelo multi-configuración
     └── test_integration.py      # el modelo aprende los mapas sobre datos
 ```
 

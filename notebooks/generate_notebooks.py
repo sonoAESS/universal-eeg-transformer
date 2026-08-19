@@ -513,6 +513,103 @@ CELL_MONTAGE_SCALP = r"""# Mapas de calor del cuero cabelludo: electrodos como m
 plot_scalp(cfg, ds, model, montage=mi)
 plt.show()"""
 
+# ---------------------------------------------------------------------------
+# Variante multi-configuración (``multi_montage``)
+# ---------------------------------------------------------------------------
+
+CELL_MULTICONFIG_SETUP = r"""# ---- Configuración del entorno ----------------------------------------
+# Renderizado inline de figuras (debe activarse antes de importar matplotlib)
+%matplotlib inline
+
+import os, sys
+from pathlib import Path
+
+# Ruta raíz del repo y paquetes propios (src/)
+ROOT = Path.cwd()
+while not (ROOT / "pyproject.toml").exists() and ROOT != ROOT.parent:
+    ROOT = ROOT.parent
+
+os.chdir(ROOT)
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from eeg_transform.experiments.multi import multiconfig_summary
+from eeg_transform.nb import (
+    config_table, evaluate_multiconfig, load_experiment, multiconfig_data,
+    plot_multiconfig_bars, plot_multiconfig_heatmap, plot_multiconfig_scalps,
+    plot_training, train_variant,
+)
+from eeg_transform.training.trainer import (
+    build_multiconfig_model, is_multiconfig_variant,
+)
+
+np.random.seed(42)
+import tensorflow as tf
+tf.random.set_seed(42)
+plt.rcParams["figure.dpi"] = 110
+
+CONFIG = ROOT / "{config_rel}"
+FORCE  = False          # True = reentrenar desde cero ignorando el checkpoint
+"""
+
+CELL_MULTICONFIG_CONFIG = r"""cfg, ds = load_experiment(CONFIG)
+data = multiconfig_data(cfg, ds)
+assert is_multiconfig_variant(cfg), "Variant {cfg.model.variant} no es multi_montage"
+print(ds.summary())
+print(multiconfig_summary(data), "\n")
+config_table(cfg).set_index(["sección", "parámetro"])"""
+
+CELL_MULTICONFIG_ARCH = r"""# Un latente canónico + proyecciones fijas por configuración P_s/Q_s
+model = build_multiconfig_model(cfg, ds, data)
+model.ensure_built()
+
+n_params = sum(int(np.prod(v.shape)) for v in model.trainable_variables)
+print(f"Variante: {cfg.model.variant}  |  latente: {cfg.model.latent_dim}  |  "
+      f"configs: {len(model.config_labels)}  |  parámetros: {n_params:,}")
+for lbl in model.config_labels:
+    A = model.transfer_matrices(lbl)
+    print(f"  {lbl:10s} P {A['source_in'].shape}  Q {A['target_out'].shape}  "
+          f"A_s→s {A['transfer'].shape}")
+print("La predicción es INTRA-configuración: C_s → C_s (misma disposición).")
+_ = model  # se reutiliza en train/eval"""
+
+CELL_MULTICONFIG_TRAIN = r"""# Entrenamiento balanceado (mismas muestras por config/época); reutiliza el
+# checkpoint de runs/{VARIANT}/best.weights.h5 si existe (salvo FORCE=True).
+model, history = train_variant(cfg, ds, force=FORCE)
+run_dir = Path(cfg.training.run_dir)
+print(f"run_dir: {run_dir}")"""
+
+CELL_MULTICONFIG_EVAL = r"""# Evaluación en test: RMSE/ve por configuración, diagonal y cruzada; las
+# columnas *_ana son la línea base analítica T_d @ pinv(T_s) sobre el ancla.
+metrics_df, summary = evaluate_multiconfig(cfg, ds, model, data)
+
+print("=== RESUMEN MULTI-CONFIG (RMSE en µV): modelo vs línea base analítica ===")
+print(summary.round(3).to_string(index=False))
+print("\n=== DETALLE POR CONFIGURACIÓN (test) ===")
+print(metrics_df.round(9).to_string(index=False))"""
+
+CELL_MULTICONFIG_HEATMAP = r"""# Heatmap de RMSE real por config origen→destino (µV, escala log10)
+plot_multiconfig_heatmap(metrics_df,
+                         title=f"RMSE real multi-config (µV, log10) — {cfg.model.variant}")
+plt.show()"""
+
+CELL_MULTICONFIG_BARS = r"""# Barras: RMSE y ve por configuración, diagonal y cruzada, frente a la
+# línea base analítica (*_ana) del propio montaje.
+plot_multiconfig_bars(metrics_df,
+                      title=f"RMSE/ve multi-config vs análisis — {cfg.model.variant}")
+plt.show()"""
+
+CELL_MULTICONFIG_SCALPS = r"""# Mapas de calor del cuero cabelludo por configuración. Filas = referencia
+# (unipolar local, bipolar local, CAR, REST); columnas: observación →
+# modelo (predicción intra-config) → verdad. El ancla REST es la referencia
+# infinita simulada y las demás se derivan de sus operadores.
+plot_multiconfig_scalps(cfg, model, data=data)
+plt.show()"""
+
 
 def _code_cell(src: str) -> nbf.NotebookNode:
     return nbf.v4.new_code_cell(src.strip())
@@ -644,6 +741,122 @@ def build_montage_notebook(variant: str) -> nbf.NotebookNode:
     return nb
 
 
+_MULTICONFIG_MARKDOWN = r"""
+El **Universal EEG Transformer** en modo **multi-configuración** entrena **un
+solo modelo** que acepta grabaciones en *cualquier* configuración de
+electrodos y predice, **en esa misma configuración**, las medidas con una
+referencia distinta (conversión de referencia intra-configuración).
+
+### Las configuraciones (`mapping.configs`)
+
+| Config | Canales | Origen |
+|---|---|---|
+| `10-20` | 19 | Subconjunto exacto de los 64 canales (selección de columnas) |
+| `10-10` | 39 | Subconjunto exacto de los 64 canales |
+| `canonical` | 64 | El montaje completo del dataset |
+| `dense-128` | 128 | **Fundido denso**: mismo campo escalar REST interpolado |
+| `dense-256` | 256 | **Fundido denso**: mismo campo escalar REST interpolado |
+
+### Cómo se construyen las observaciones (fiel a la física)
+
+1. **Ancla única**: la referencia al infinito (REST) del montaje canónico,
+   obtenida con el lead field multicapa analítico (`T_canon pg`).
+2. Cada configuración observa ese campo en sus propias posiciones:
+   los subconjuntos reales son **selección de columnas** del ancla; los densos
+   son **interpolación esférica (Perrin)** del ancla a `128/256` posiciones
+   en el casquete (fibonacci, radio = mediana de la norma canónica).
+3. Sobre esa observación se computan las 4 referencias **del propio montaje**
+   (con su lead field): unipolar/bipolar/CAR locales y REST de configuración.
+4. Proyecciones fijas `P_s`/`Q_s`: para subconjuntos, selección exacta
+   (`Q` selecciona las columnas del core canonico); para densos, splines. La
+   ruta efectiva `s→s` es `A_s = Q_s·core·P_s`.
+
+### Fairness del experimento
+
+- **Balanceo por configuración**: todas aportan las mismas muestras por
+  lote/época (`multi_max_samples_per_split` por split), sin sesgar la
+  minimización hacia las configs más densas.
+- **Inicialización lineal empírica** sobre el canónico (`latent_dim = C`):
+  el latente ancla al unipolar canónico y cada ruta arranca bien condicionada.
+- **Pérdida**: MSE estandarizado por ruta (Z-score por lote) + MSE real.
+- **Evaluación (test)**: RMSE/correlación/variación explicada **por
+  configuración** (diagonal y cruzada entre referencias) comparadas con la
+  **línea base analítica** `T_d @ pinv(T_s)` del propio montaje (columnas
+  `*_ana`): la ganancia del modelo se lee restando ambas.
+
+### Notas
+
+- Las configs `dense-N` son simuladas (interpolación, no registros reales);
+  las 10-20/10-10 son subconjuntos reales de los 64 canales (PhysioNet eegbci).
+- Conceptos completos (física lead-field/REST, métricas, lectura de
+  resultados): `docs/guia_conceptual.md`.
+"""
+
+
+def _build_multiconfig_markdown(variant: str) -> str:
+    text = _MULTICONFIG_MARKDOWN
+    return text
+
+
+def _multiconfig_warning_markdown(variant: str) -> str:
+    return (
+        f"> **Nota de reproducción:** el modelo ya entrenado (12 sujetos) está en "
+        f"`runs/{variant}`. Con `FORCE = False` el notebook **reutiliza el "
+        f"checkpoint** sin reentrenar (segundos); póngalo en `True` solo para "
+        f"reentrenar desde cero."
+    )
+
+
+def build_multiconfig_notebook(variant: str) -> nbf.NotebookNode:
+    nb = nbf.v4.new_notebook()
+    nb["metadata"] = {
+        "kernelspec": {"display_name": "Python 3 (entorno)", "language": "python",
+                       "name": "python3"},
+        "language_info": {"name": "python", "version": "3.12"},
+    }
+    cells = [
+        _md_cell(f"# Variante `{variant}` — Universal EEG Transformer\n\n"
+                 f"{_build_multiconfig_markdown(variant)}\n\n"
+                 f"{_multiconfig_warning_markdown(variant)}"),
+        _md_cell("## 1. Carga del experimento\n\n"
+                 "Configuración YAML, dataset real cacheado y los **insumos "
+                 "multi-configuración** (observaciones y referencias por "
+                 "configuración)."),
+        _code_cell(CELL_MULTICONFIG_SETUP.format(config_rel=f"config/{variant}.yaml")),
+        _code_cell(CELL_MULTICONFIG_CONFIG),
+        _md_cell("## 2. Arquitectura\n\n"
+                 "Un autoencoder universal en el canónico + **proyecciones fijas** "
+                 "`P_s`/`Q_s` por configuración. Las matrices efectivas "
+                 "`A_s→s = Q_s·core·P_s` convierten las 4 referencias dentro de "
+                 "cada configuración."),
+        _code_cell(CELL_MULTICONFIG_ARCH),
+        _md_cell("## 3. Entrenamiento\n\n"
+                 "Adam (lr 1e-3), Z-score por lote, early stopping y reduce-LR. "
+                 "Balanceado: mismas muestras por config/lote. Reutiliza el "
+                 "checkpoint si existe."),
+        _code_cell(CELL_MULTICONFIG_TRAIN),
+        _md_cell("## 4. Evaluación en test\n\n"
+                 "Métricas por configuración (diagonal/cruzada entre referencias) "
+                 "frente a la **línea base analítica** `T_d @ pinv(T_s)` del propio "
+                 "montaje (columnas `*_ana`)."),
+        _code_cell(CELL_MULTICONFIG_EVAL),
+        _md_cell("## 5. Figuras inline\n\n"
+                 "Curvas de aprendizaje, heatmap de RMSE por config origen→destino, "
+                 "barras modelo vs análisis, y los **mapas de calor del cuero "
+                 "cabelludo** por configuración (observación → modelo → verdad)."),
+        _code_cell(CELL_PLOT_TRAINING),
+        _code_cell(CELL_MULTICONFIG_HEATMAP),
+        _code_cell(CELL_MULTICONFIG_BARS),
+        _code_cell(CELL_MULTICONFIG_SCALPS),
+        _md_cell("## Conclusiones\n\n"
+                 "Consulte `docs/guia_conceptual.md` (conceptos y métricas), "
+                 "`docs/results_comparison.md` (comparativa de variantes) y los "
+                 "resultados guardados en `runs/multi_montage/metrics_test.csv`."),
+    ]
+    nb["cells"] = cells
+    return nb
+
+
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for variant in ("free", "group", "projected", "soft_group", "wide", "bottleneck"):
@@ -654,6 +867,12 @@ def main() -> None:
         print(f"Generado: {path}")
     for variant in ("montage_leadfield", "montage_heatmap"):
         nb = build_montage_notebook(variant)
+        path = OUT_DIR / f"{variant}.ipynb"
+        with path.open("w", encoding="utf-8") as f:
+            nbf.write(nb, f)
+        print(f"Generado: {path}")
+    for variant in ("multi_montage",):
+        nb = build_multiconfig_notebook(variant)
         path = OUT_DIR / f"{variant}.ipynb"
         with path.open("w", encoding="utf-8") as f:
             nbf.write(nb, f)
