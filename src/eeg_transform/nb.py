@@ -28,7 +28,10 @@ from .logging_conf import get_logger
 from .training.trainer import (
     build_model,
     build_montage_inputs,
+    build_multiconfig_model,
     is_montage_variant,
+    is_multiconfig_variant,
+    load_multiconfig_data,
     train,
 )
 
@@ -136,6 +139,72 @@ def plot_scalp(cfg, ds, model, montage=None):
         model, ds, montage, cfg, split="test",
         n_samples=cfg.evaluation.n_plot_samples,
         grid_px=cfg.mapping.grid_px,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Múltiples configuraciones de electrodos (variante ``multi_montage``)
+# ---------------------------------------------------------------------------
+
+def multiconfig_data(cfg: EEGTransformConfig, ds: MultiReferenceDataset):
+    """Datos multi-configuración (observaciones por configuración + refs)."""
+    return load_multiconfig_data(cfg, ds)
+
+
+def ensure_multiconfig_model(cfg: EEGTransformConfig, ds: MultiReferenceDataset,
+                             data: object | None = None):
+    """Modelo multi-configuración con el checkpoint cargado si existe."""
+    data = data or multiconfig_data(cfg, ds)
+    model = build_multiconfig_model(cfg, data)
+    model.ensure_built()
+    checkpoint = Path(cfg.training.run_dir) / "best.weights.h5"
+    if checkpoint.exists():
+        model.load_weights(str(checkpoint))
+        log.info("Modelo multi-configuración cargado desde %s", checkpoint)
+    return model
+
+
+def evaluate_multiconfig(
+    cfg: EEGTransformConfig,
+    ds: MultiReferenceDataset,
+    model,
+    data: object | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Métricas por configuración (diagonal/cruzada + línea base analítica).
+
+    Returns
+    -------
+    ``(metrics_df, summary)`` con la línea base analítica
+    (``T_d @ pinv(T_s)`` sobre la ref de ancla) en columnas ``*_ana``.
+    """
+    data = data or multiconfig_data(cfg, ds)
+    metrics_df = metrics.evaluate_multiconfig_routes(model, data, split="test")
+    summary = metrics.summarize_multiconfig(metrics_df)
+    return metrics_df, summary
+
+
+def plot_multiconfig_heatmap(metrics_df: pd.DataFrame, title: str):
+    """Figura heatmap RMSE (µV, escala log10) por config origen→destino."""
+    plots.set_plot_backend("inline")
+    return plots.multiconfig_heatmap_fig(metrics_df, title)
+
+
+def plot_multiconfig_bars(metrics_df: pd.DataFrame, title: str):
+    """Figura de barras RMSE/ve por configuración (línea base analítica)."""
+    plots.set_plot_backend("inline")
+    return plots.multiconfig_bars_fig(metrics_df, title)
+
+
+def plot_multiconfig_scalps(cfg: EEGTransformConfig, model, data=None,
+                            split: str = "test",
+                            n_samples: int | None = None):
+    """Mapas de calor del cuero cabelludo por configuración."""
+    plots.set_plot_backend("inline")
+    if data is None:
+        raise ValueError("plot_multiconfig_scalps requiere `data`.")
+    return plots.multiconfig_scalp_fig(
+        model, data, cfg, split=split,
+        n_samples=n_samples or cfg.evaluation.n_plot_samples,
     )
 
 

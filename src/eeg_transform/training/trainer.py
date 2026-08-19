@@ -22,6 +22,62 @@ def is_montage_variant(cfg: EEGTransformConfig) -> bool:
     return cfg.model.variant.startswith("montage_")
 
 
+def is_multiconfig_variant(cfg: EEGTransformConfig) -> bool:
+    """True si la variante entrena sobre varias configuraciones (``multi_montage``)."""
+    return cfg.model.variant == "multi_montage"
+
+
+def load_multiconfig_data(cfg: EEGTransformConfig, ds: MultiReferenceDataset, force: bool = False):
+    """Construye/carga las configuraciones balanceadas de electrodos."""
+    from ..experiments.multi import build_multiconfig
+
+    return build_multiconfig(ds, cfg, force=force)
+
+
+def build_multiconfig_model(cfg, data):
+    """Instancia el autoencoder multi-configuración (core canónico + P_s/Q_s)."""
+    from ..models.multi_montage import MultiMontageAutoencoder
+
+    core = build_model(cfg, n_channels=data.configs["canonical"].n_channels,
+                       projection=None)
+    core.ensure_built()
+    projections = {l: m.projection for l, m in data.configs.items()}
+    out_maps = {l: m.out_map for l, m in data.configs.items()}
+    return MultiMontageAutoencoder(core=core, projections=projections,
+                                   out_maps=out_maps)
+
+
+def build_multiconfig_dataset(
+    data,
+    split: str,
+    batch_size: int,
+    shuffle: bool = False,
+    seed: int = 42,
+    buffer: int = 20_000,
+    prefetch: int = 4,
+    dtype: str = "float32",
+) -> tf.data.Dataset:
+    """Dataset multi-configuración (balanceado por construcción).
+
+    Cada elemento es la tupla ``(X, Y)`` de dos diccionarios
+    ``{configuración: {referencia: (n, C_s)}}`` con ``X == Y`` (el objetivo son
+    las referencias de la propia configuración). Las configuraciones comparten
+    los mismos índices/muestras (``data.budget_idx``), luego cada una aporta la
+    misma fracción de datos por época.
+    """
+    parts = {
+        c: {k: m.refs[split][k].astype(dtype) for k in m.refs[split]}
+        for c, m in data.configs.items()
+    }
+    dset = tf.data.Dataset.from_tensor_slices((parts, parts))
+    n = data.n_budget(split)
+    if shuffle:
+        dset = dset.shuffle(min(buffer, max(1, n)), seed=seed,
+                            reshuffle_each_iteration=True)
+    dset = dset.repeat()
+    return dset.batch(batch_size, drop_remainder=False).prefetch(prefetch)
+
+
 def build_montage_inputs(cfg: EEGTransformConfig, ds: MultiReferenceDataset):
     """Insume de montaje (observaciones fuente + proyección) para entrenar."""
     from ..experiments.montage import build_montage_inputs as _build
@@ -129,6 +185,9 @@ def train(
     run_dir = Path(tcfg.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    if is_multiconfig_variant(cfg):
+        return _train_multiconfig(ds, cfg, run_dir, tcfg, force)
+
     montage = build_montage_inputs(cfg, ds) if is_montage_variant(cfg) else None
 
     checkpoint = run_dir / "best.weights.h5"
@@ -226,4 +285,98 @@ def train(
     model.load_weights(str(checkpoint))
     model.save(run_dir / "model.keras")
     log.info("Modelo guardado en %s", run_dir / "model.keras")
+    return model, history
+
+
+def _train_multiconfig(ds, cfg, run_dir, tcfg, force):
+    """Entrena ``multi_montage``: autoencoder canónico sobre varias configs.
+
+    Las configuraciones balanceadas se cargan de caché (ver ``experiments.multi``);
+    el autoencoder lineal canónico (64) se comparte y la salida intra-configuración
+    se lee con los mapas fijos ``Q_s``. Inicialización lineal empírica con el
+    montaje canónico.
+    """
+    from ..models.multi_montage import MultiMontageAutoencoder
+
+    data = load_multiconfig_data(cfg, ds, force=force)
+
+    checkpoint = run_dir / "best.weights.h5"
+    history_csv = run_dir / "history.csv"
+    if checkpoint.exists() and not force:
+        log.info("Checkpoint previo detectado (%s) — reutilizando.", checkpoint)
+        model = build_multiconfig_model(cfg, data)
+        model.core.ensure_built()
+        model.load_weights(str(checkpoint))
+        history = load_history(history_csv)
+        return model, history
+    if history_csv.exists():
+        history_csv.unlink()
+
+    tf.random.set_seed(tcfg.seed)
+    np.random.seed(tcfg.seed)
+
+    model = build_multiconfig_model(cfg, data)
+
+    # Pre-entrenamiento lineal con el montaje canónico (P=Q=I), igual que la
+    # variante estándar: ancla el latente a la transformación linear exacta.
+    if model.core.latent_dim == model.n_canonical:
+        init_refs = {
+            k: data.configs["canonical"].refs["train"][k]
+            for k in REFERENCE_KINDS
+        }
+        model.core.init_from_data(init_refs)
+        log.info("Inicialización lineal empírica (montaje canónico).")
+
+    model.compile(
+        optimizer=tf.keras.optimizers.get(
+            {"class_name": cfg.model.optimizer,
+             "config": {"learning_rate": cfg.model.learning_rate}}
+        )
+    )
+
+    train_ds = build_multiconfig_dataset(
+        data, "train", tcfg.batch_size, shuffle=True, seed=tcfg.seed,
+        buffer=tcfg.shuffle_buffer, prefetch=tcfg.prefetch, dtype=cfg.dataset.dtype,
+    )
+    val_ds = build_multiconfig_dataset(
+        data, "val", tcfg.batch_size, shuffle=False, prefetch=tcfg.prefetch,
+        dtype=cfg.dataset.dtype,
+    )
+
+    steps_per_epoch = max(1, data.n_budget("train") // tcfg.batch_size)
+    validation_steps = max(1, data.n_budget("val") // tcfg.batch_size)
+
+    callbacks = [
+        tf.keras.callbacks.ModelCheckpoint(
+            str(checkpoint), monitor="val_loss_estandarizada",
+            save_best_only=tcfg.save_best_only, save_weights_only=True, mode="min",
+            verbose=0,
+        ),
+        tf.keras.callbacks.EarlyStopping(
+            monitor="val_loss_estandarizada", patience=tcfg.early_stop_patience,
+            restore_best_weights=True, mode="min",
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss_estandarizada", factor=tcfg.reduce_lr_factor,
+            patience=tcfg.reduce_lr_patience, min_lr=tcfg.min_lr, mode="min",
+            verbose=0,
+        ),
+        tf.keras.callbacks.CSVLogger(str(run_dir / "history.csv"), append=False),
+    ]
+
+    log.info("Entrenando %s épocas sobre %d configuraciones (batch=%d)...",
+             tcfg.epochs, len(data.order), tcfg.batch_size)
+    history = model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=tcfg.epochs,
+        steps_per_epoch=steps_per_epoch,
+        validation_steps=validation_steps,
+        callbacks=callbacks,
+        verbose=1,
+    )
+
+    model.load_weights(str(checkpoint))
+    model.save(run_dir / "model.keras")
+    log.info("Modelo multi-configuración guardado en %s", run_dir / "model.keras")
     return model, history

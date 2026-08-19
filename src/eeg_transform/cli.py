@@ -57,10 +57,42 @@ def cmd_eval(cfg) -> None:
         build_model,
         build_montage_inputs,
         is_montage_variant,
+        is_multiconfig_variant,
+        load_multiconfig_data,
+        build_multiconfig_model,
     )
 
     run_dir = Path(cfg.training.run_dir)
     ds = build_dataset(cfg)
+
+    if is_multiconfig_variant(cfg):
+        data = load_multiconfig_data(cfg, ds)
+        model = build_multiconfig_model(cfg, data)
+        model.core.ensure_built()
+        model.load_weights(str(run_dir / "best.weights.h5"))
+        model.compile(optimizer="adam")
+
+        metrics_df = metrics.evaluate_multiconfig_routes(model, data, split="test")
+        summ = metrics.summarize_multiconfig(metrics_df)
+        print("\n============== MULTI-CONFIGURACION (TEST) ===============")
+        print("Configuraciones balanceadas: "
+              + ", ".join(f"{l} ({data.configs[l].n_channels} ch)"
+                          for l in data.order))
+        print(summ.to_string(formatters={
+            "rmse_diag_uV": "{:.3f}".format, "r_diag": "{:.4f}".format,
+            "rmse_cross_uV": "{:.3f}".format, "r_cross": "{:.4f}".format,
+            "ve_cross": "{:.3f}".format,
+            "rmse_ana_cross_uV": "{:.3f}".format,
+            "r_ana_cross": "{:.4f}".format, "ve_ana_cross": "{:.3f}".format}))
+        metrics_df.to_csv(run_dir / "metrics_test.csv", index=False)
+
+        history_csv = run_dir / "history.csv"
+        if history_csv.exists():
+            plots.plot_learning_curves(history_csv, run_dir)
+        plots.plot_multiconfig_heatmap(metrics_df, run_dir)
+        plots.plot_multiconfig_bars(metrics_df, run_dir)
+        plots.plot_multiconfig_scalps(model, data, run_dir)
+        return
 
     montage = build_montage_inputs(cfg, ds) if is_montage_variant(cfg) else None
     model = build_model(cfg, ds.n_channels,

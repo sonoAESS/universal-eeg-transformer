@@ -78,7 +78,8 @@ class DatasetConfig:
 @dataclass
 class MappingConfig:
     """Unificación de montajes: proyección de cualquier distribución de
-    electrodos al espacio canónico (usada por las variantes ``montage_*``).
+    electrodos al espacio canónico (usada por las variantes ``montage_*`` y
+    ``multi_montage``).
 
     * ``method``       : ``leadfield`` (solución inversa con el lead field
       analítico), ``spline`` (interpolación esférica, estilo *topomapa* /
@@ -93,6 +94,17 @@ class MappingConfig:
       menos denso es el montaje de origen (más regularización a sparso).
     * ``grid_px``      : resolución (px) de la malla del cuero cabelludo para
       representar la actividad como un *heatmap* de manchas.
+    * ``configs``      : configuraciones de la variante ``multi_montage``
+      (entrenamiento conjunto y balanceado sobre varias distribuciones de
+      electrodos). Cada etiqueta resuelve a un generador: ``10-20`` (19 ch
+      reales, subconjunto del canónico), ``canonical`` (los electrodos
+      nativos), ``dense-N`` (N posiciones simuladas cuasi-uniformes sobre el
+      casquete del cuero cabelludo, p. ej. ``dense-128``/``dense-256``),
+      ``10-10`` (39 ch reales). Se admiten todos los montajes que comparta el
+      dataset canónico.
+    * ``multi_max_samples_per_split``: presupuesto de muestras por split y por
+      configuración (se submuestran con equiespaciado determinista). Igual para
+      todas las configuraciones → proporciones balanceadas por construcción.
     """
 
     method: str = "leadfield"
@@ -101,6 +113,27 @@ class MappingConfig:
     smoothness: float = 1e-5
     adaptive_smoothness: bool = True
     grid_px: int = 48
+    configs: list[str] = field(
+        default_factory=lambda: ["10-20", "canonical", "dense-128", "dense-256"]
+    )
+    multi_max_samples_per_split: int = 40_000
+
+
+def __post_init__(self):
+        # PyYAML puede dejar notaciones como '1e-5' como cadena; se coerciona.
+        try:
+            self.smoothness = float(self.smoothness)
+        except (TypeError, ValueError):
+            pass
+        if self.n_components is not None:
+            try:
+                self.n_components = int(self.n_components)
+            except (TypeError, ValueError):
+                raise ValueError("mapping.n_components debe ser un entero o null.")
+        try:
+            self.multi_max_samples_per_split = int(self.multi_max_samples_per_split)
+        except (TypeError, ValueError):
+            raise ValueError("mapping.multi_max_samples_per_split debe ser un entero.")
 
 
 # Variantes de arquitectura del transformador (ver models.universal_transformer).
@@ -120,9 +153,18 @@ class MappingConfig:
 #                    al espacio canónico, suavizada según la densidad del
 #                    montaje; visualmente equivale a un *topomapa* donde la
 #                    actividad aparece como manchas difusas.
+#   * ``multi_montage``  : entrenamiento conjunto y balanceado sobre VARIAS
+#                    configuraciones de electrodos (p. ej. 19 canales 10-20,
+#                    el montaje canónico de 64, y montajes densos simulados de
+#                    128 y 256 electrodos). Cada configuración se embebe en el
+#                    espacio canónico con una matriz fija ``P_s`` y se lee con
+#                    un mapa fijo ``Q_s``; el autoencoder comparte las 8
+#                    matrices (W_enc/W_dec) entre todas las configuraciones.
+#                    El modelo acepta cualquier configuración y predice, EN ESA
+#                    configuración, las medidas con otra referencia.
 MODEL_VARIANTS: tuple[str, ...] = (
     "free", "group", "projected", "soft_group",
-    "montage_leadfield", "montage_heatmap",
+    "montage_leadfield", "montage_heatmap", "multi_montage",
 )
 
 # Métodos de proyección entre montajes (ver mapping.build_projection).
@@ -145,6 +187,23 @@ class ModelConfig:
     # Peso de la penalización de consistencia de composición (soft_group):
     # termina la física de grupo como pérdida suave en lugar de estructura.
     comp_penalty_weight: float = 0.0
+
+    def __post_init__(self):
+        # PyYAML puede dejar '1e-3' como cadena; se coerciona a numérico.
+        for name in ("latent_dim",):
+            try:
+                setattr(self, name, int(getattr(self, name)))
+            except (TypeError, ValueError):
+                pass
+        for name in ("use_bias",):
+            v = getattr(self, name)
+            if isinstance(v, str):
+                setattr(self, name, v.strip().lower() in ("true", "1", "yes"))
+        for name in ("kernel_regularizer_l2", "learning_rate", "comp_penalty_weight"):
+            try:
+                setattr(self, name, float(getattr(self, name)))
+            except (TypeError, ValueError):
+                pass
 
 
 @dataclass
@@ -251,6 +310,28 @@ class EEGTransformConfig:
                     f"mapping.method == '{expected}', no "
                     f"'{self.mapping.method}'."
                 )
+        if self.model.variant == "multi_montage":
+            if "canonical" not in set(self.mapping.configs):
+                raise ValueError(
+                    "multi_montage requiere la configuración 'canonical' "
+                    "en mapping.configs (es el espacio del autoencoder)."
+                )
+            labels = set(self.mapping.configs)
+            for lab in sorted(labels):
+                if lab == "canonical":
+                    continue
+                if lab == "10-20" or lab == "10-10" or lab.startswith("dense-"):
+                    continue
+                raise ValueError(
+                    f"Configuración '{lab}' no soportada en multi_montage "
+                    "(válidas: '10-20', '10-10', 'canonical' o 'dense-<N>')."
+                )
+            if self.mapping.multi_max_samples_per_split < 1_000:
+                raise ValueError(
+                    "multi_max_samples_per_split debe ser >= 1000 muestras."
+                )
+        if self.model.variant == "multi_montage" and self.model.latent_dim not in (0, -1):
+            raise ValueError("variant='multi_montage' requiere latent_dim 0/auto.")
         if self.mapping.method not in MAPPING_METHODS:
             raise ValueError(
                 f"mapping.method debe ser una de {MAPPING_METHODS}, "

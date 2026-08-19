@@ -245,6 +245,94 @@ def composition_error_table(model, ds) -> pd.DataFrame:
     return summary.reset_index(drop=True)
 
 
+def predict_multiconfig_routes(
+    model, data, split: str = "test",
+) -> dict[str, dict[str, dict[str, np.ndarray]]]:
+    """Predice TODAS las rutas y configuraciones del modelo multi-montaje.
+
+    Returns
+    -------
+    ``{configuración: {origen: {destino: (n, C_s)}}}``.
+    """
+    out = {}
+    import tensorflow as tf
+
+    for label in data.order:
+        mc = data.configs[label]
+        tensors = {
+            k: tf.convert_to_tensor(mc.refs[split][k], dtype=tf.float32)
+            for k in KINDS
+        }
+        out[label] = {}
+        for s in KINDS:
+            preds = model(tensors[s], cfg=label, source=s)
+            out[label][s] = {d: preds[d].numpy() for d in KINDS}
+    return out
+
+
+def evaluate_multiconfig_routes(
+    model, data, split: str = "test",
+) -> pd.DataFrame:
+    """Métricas por ruta intra-configuración + línea base analítica.
+
+    Para cada configuración y cada ruta ``s->d`` se comparan la predicción del
+    modelo (en esa misma configuración, ``(n, C_s)``) con la referencia
+    canónica del montaje. Además se reporta la **línea base analítica**
+    ``T_d @ pinv(T_s)`` calculada con las matrices de referencia del propio
+    montaje (columnas ``rmse_ana``, ``r_ana``, ``ve_ana``).
+
+    El error se mide en el subespacio observable (centrado por instante): el
+    modo constante de referencia no es recuperable.
+    """
+    rows = []
+    for label in data.order:
+        mc = data.configs[label]
+        targets = {k: mc.refs[split][k] for k in KINDS}
+        sources = {k: mc.refs[split][k] for k in KINDS}
+        preds = predict_multiconfig_routes(model, data, split)[label]
+        n_c = mc.n_channels
+        for s in KINDS:
+            for d in KINDS:
+                st = _route_stats(targets[d], preds[s][d])
+                ana = inter_reference_matrix(
+                    s, d, n_c,
+                    unipolar_ref_index=mc.unipolar_ref_index,
+                    lead_field=mc.leadfield,
+                )
+                sta = _route_stats(targets[d], sources[s] @ ana)
+                rows.append({
+                    "config": label,
+                    "origen": s,
+                    "destino": d,
+                    "mse": st["mse"], "rmse": st["rmse"], "mae": st["mae"],
+                    "r": st["r"], "ve": st["ve"],
+                    "rmse_ana": sta["rmse"], "r_ana": sta["r"],
+                    "ve_ana": sta["ve"],
+                })
+    return pd.DataFrame(rows)
+
+
+def summarize_multiconfig(metrics_df: pd.DataFrame) -> pd.DataFrame:
+    """Resumen por configuración (diagonal/cruzada) del modelo vs analítico."""
+    rows = []
+    for label, g in metrics_df.groupby("config", sort=False):
+        diag = g[g["origen"] == g["destino"]]
+        off = g[g["origen"] != g["destino"]]
+        rows.append({
+            "config": label,
+            "n_rutas": len(g),
+            "rmse_diag_uV": diag["rmse"].mean() * 1e6,
+            "r_diag": diag["r"].mean(),
+            "rmse_cross_uV": off["rmse"].mean() * 1e6,
+            "r_cross": off["r"].mean(),
+            "ve_cross": off["ve"].mean(),
+            "rmse_ana_cross_uV": off["rmse_ana"].mean() * 1e6,
+            "r_ana_cross": off["r_ana"].mean(),
+            "ve_ana_cross": off["ve_ana"].mean(),
+        })
+    return pd.DataFrame(rows)
+
+
 def summarize(metrics_df: pd.DataFrame, label: str) -> pd.DataFrame:
     """Resumen de métricas por tipo de ruta (diagonal / cruzada)."""
     diag = metrics_df[metrics_df["origen"] == metrics_df["destino"]]
