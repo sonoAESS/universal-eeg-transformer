@@ -128,3 +128,36 @@ contra la proyección analítica pura `obs @ P` (`*_proy`).
 Detalle completo, metodología fiel y desglose por referencia en
 `docs/mapping_wip.md`; visualización con mapas de calor del cuero cabelludo en
 `notebooks/montage_leadfield.ipynb` y `notebooks/montage_heatmap.ipynb`.
+
+## Múltiples configuraciones de electrodos (multi_montage / multi_heatmap)
+
+**Fecha:** 2026-08-20 · Un solo modelo comparte un core canónico (64 ch) y
+proyecciones fijas `P_s`/`Q_s` por configuración: **19 (10-20), 64
+(canonical), 128 y 256 (densos mapeados por spline sobre 10-20)**, con las 4
+referencias intra-configuración. `multi_heatmap` añade el término
+`surface_loss` sobre la malla compartida. Mismo dataset (12 sujetos).
+Detalle en `docs/experiments.md`.
+
+| Configuración | rmse diag (µV) | rmse cross (µV) | r diag | r cross | peor ruta (cross) |
+|---------------|---------------:|----------------:|-------:|--------:|------------------:|
+| **10-20 (19ch)** | 4.6 | 7.8 | 0.977 | 0.938 | rest→bipolar 0.85 |
+| canonical (64ch) | 11.7 | 14.5 | 0.853 | 0.807 | bipolar→rest 0.56 |
+| dense-128 | 6.9 | 8.5 | 0.786 | 0.587 | bipolar→rest 0.07 |
+| dense-256 | 6.9 | 7.6 | 0.727 | 0.593 | bipolar→rest 0.18 |
+
+Campo de superficie (`multi_heatmap`): 10-20 `r 0.97/0.93` (diag/cross),
+canonical `0.86/0.81`, dense `0.51–0.64/0.26–0.34`.
+
+### Interpretación (multi vs variantes canónicas)
+
+* **No es comparable 1:1 con las variantes de referencia** (mismo techo
+  físico que en montaje: las rutas parten de observaciones 19→256 ch, no de 64
+  nativas). La mejor config (10-20) logra `r_cross 0.94`; el canonical
+  compartido sufre multitarea (uni→uni 0.99 pero REST baja a 0.56).
+* **El `surface_loss` ancla el patrón espacial**: campo y rutas correlacionan
+  (10-20: 0.93 vs 0.94); no es decorativo.
+* **En densas el REST es degenerado por el spline**: la línea base analítica
+  `T_d·pinv(T_s)` también falla (r 0.17–0.35, ve −48) porque los canales
+  extra son interpolaciones de 19 y el promedio REST del montaje denso no
+  representa el de 64 ch. Exploración de alternativas (RESTRIDGE/lead field)
+  en curso.
