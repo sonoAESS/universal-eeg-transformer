@@ -559,17 +559,16 @@ FORCE  = False          # True = reentrenar desde cero ignorando el checkpoint
 
 CELL_MULTICONFIG_CONFIG = r"""cfg, ds = load_experiment(CONFIG)
 data = multiconfig_data(cfg, ds)
-assert is_multiconfig_variant(cfg), "Variant {cfg.model.variant} no es multi_montage/multi_heatmap"
+assert is_multiconfig_variant(cfg), f"Variant {cfg.model.variant} no es multi_montage/multi_heatmap"
 print(ds.summary())
 print(multiconfig_summary(data), "\n")
 config_table(cfg).set_index(["sección", "parámetro"])"""
 
 CELL_MULTICONFIG_ARCH = r"""# Un latente canónico + proyecciones fijas por configuración P_s/Q_s
-model = build_multiconfig_model(cfg, ds, data)
-model.ensure_built()
+model = build_multiconfig_model(cfg, data)
 
 n_params = sum(int(np.prod(v.shape)) for v in model.trainable_variables)
-print(f"Variante: {cfg.model.variant}  |  latente: {cfg.model.n_canonical}  |  "
+print(f"Variante: {cfg.model.variant}  |  latente canónico: {model.n_canonical}  |  "
       f"configs: {len(model.configs)}  |  parámetros: {n_params:,}")
 for lbl in model.configs:
     A = model.transfer_matrices(lbl)

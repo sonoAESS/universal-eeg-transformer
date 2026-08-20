@@ -186,13 +186,17 @@ def evaluate_multiconfig(
 def plot_multiconfig_heatmap(metrics_df: pd.DataFrame, title: str):
     """Figura heatmap RMSE (µV, escala log10) por config origen→destino."""
     plots.set_plot_backend("inline")
-    return plots.multiconfig_heatmap_fig(metrics_df, title)
+    fig = plots.multiconfig_heatmap_fig(metrics_df)
+    fig.suptitle(title)
+    return fig
 
 
 def plot_multiconfig_bars(metrics_df: pd.DataFrame, title: str):
     """Figura de barras RMSE/ve por configuración (línea base analítica)."""
     plots.set_plot_backend("inline")
-    return plots.multiconfig_bars_fig(metrics_df, title)
+    fig = plots.multiconfig_bars_fig(metrics_df)
+    fig.suptitle(title)
+    return fig
 
 
 def plot_multiconfig_scalps(cfg: EEGTransformConfig, model, data=None,
@@ -238,7 +242,9 @@ def evaluate_multiconfig_surface(
 def plot_multiconfig_surface(metrics_surface_df: pd.DataFrame, title: str):
     """Figura de barras del campo de superficie por configuración."""
     plots.set_plot_backend("inline")
-    return plots.multiconfig_surface_fig(metrics_surface_df)
+    fig = plots.multiconfig_surface_fig(metrics_surface_df)
+    fig.suptitle(title)
+    return fig
 
 
 def summarize(metrics_df: pd.DataFrame) -> pd.DataFrame:
