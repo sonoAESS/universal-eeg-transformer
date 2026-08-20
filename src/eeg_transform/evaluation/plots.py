@@ -50,8 +50,16 @@ def _save(fig, run_dir: Path, name: str) -> None:
     log.info("Figura guardada: %s", out / name)
 
 
-def learning_curves_fig(history_csv: str | Path) -> plt.Figure:
-    """Curvas de entrenamiento (pérdida estandarizada y MSE real)."""
+def learning_curves_fig(
+    history_csv: str | Path,
+    run_label: str | None = None,
+) -> plt.Figure:
+    """Curvas de entrenamiento (pérdida estandarizada y MSE real).
+
+    El panel de MSE real usa escala logarítmica (los valores caen varias
+    décadas) y se marca la época de mejor validación (restaurada por el
+    EarlyStopping/checkpoint).
+    """
     df = pd.read_csv(history_csv)
     has_real = {"mse_real_V2" in df, "val_mse_real_V2" in df}
     ncols = 2 if ("mse_real_V2" in df or "val_mse_real_V2" in df) else 1
@@ -62,22 +70,29 @@ def learning_curves_fig(history_csv: str | Path) -> plt.Figure:
                  color="rebeccapurple", lw=2)
     axes[0].plot(df["val_loss_estandarizada"], label="val", ls="--",
                  color="gold", lw=2)
+    best = df["val_loss_estandarizada"].idxmin()
+    axes[0].axvline(best, color="gray", ls=":", lw=1, alpha=0.7,
+                    label=f"mejor val (época {best + 1})")
     axes[0].set_xlabel("Época")
     axes[0].set_ylabel("Pérdida estandarizada")
     axes[0].set_title("Pérdida estandarizada por época")
-    axes[0].legend(loc="upper right", frameon=False)
+    axes[0].legend(loc="upper right", frameon=False, fontsize=8)
     axes[0].grid(alpha=0.4)
     for ax in axes[1:]:
         ax.plot(df["mse_real_V2"], label="train", color="teal", lw=2)
         if "val_mse_real_V2" in df:
             ax.plot(df["val_mse_real_V2"], ls="--", color="coral", lw=2,
                     label="val")
+        ax.set_yscale("log")
         ax.set_xlabel("Época")
         ax.set_ylabel("MSE real (V²)")
-        ax.set_title("MSE real por época")
-        ax.legend(loc="upper right", frameon=False)
-        ax.grid(alpha=0.4)
-    fig.suptitle("Curvas de entrenamiento", y=0.98)
+        ax.set_title("MSE real por época (log)")
+        ax.legend(loc="upper right", frameon=False, fontsize=8)
+        ax.grid(alpha=0.4, which="both")
+    title = "Curvas de entrenamiento"
+    if run_label:
+        title = f"{title} · {run_label}"
+    fig.suptitle(title, y=0.98)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     return fig
 
@@ -151,8 +166,10 @@ def traces_fig(model, ds, split: str, channel: str, n_samples: int) -> plt.Figur
     return fig
 
 
-def plot_learning_curves(history_csv: str | Path, run_dir: Path) -> None:
-    _save(learning_curves_fig(history_csv), run_dir, "learning.png")
+def plot_learning_curves(history_csv: str | Path, run_dir: Path,
+                         run_label: str | None = None) -> None:
+    _save(learning_curves_fig(history_csv, run_label=run_label), run_dir,
+          "learning.png")
 
 
 def plot_heatmap(
@@ -365,6 +382,50 @@ def multiconfig_bars_fig(metrics_df: pd.DataFrame) -> plt.Figure:
     return fig
 
 
+def multiconfig_surface_fig(metrics_surface_df: pd.DataFrame) -> plt.Figure:
+    """Barras del CAMPO DE SUPERFICIE: VE y RMSE en la malla por configuración.
+
+    Mide la fidelidad del "heatmap" predicho (patrón espacial interpolado a la
+    malla compartida), no solo de cada electrodo por separado.
+    """
+    summ = []
+    for label, g in metrics_surface_df.groupby("config", sort=False):
+        off = g[g["origen"] != g["destino"]]
+        diag = g[g["origen"] == g["destino"]]
+        summ.append({
+            "config": label,
+            "diag": diag["rmse_field"].mean() * 1e6,
+            "cross": off["rmse_field"].mean() * 1e6,
+            "ve_cross": off["ve_field"].mean(),
+            "r_cross": off["r_field"].mean(),
+        })
+    df = pd.DataFrame(summ)
+    x = np.arange(len(df))
+    fig, ax = plt.subplots(figsize=(8.4, 4.8))
+    ax.bar(x - 0.2, df["diag"], 0.4, color="silver", label="RMSE diag.",
+           alpha=0.9)
+    ax.bar(x + 0.2, df["cross"], 0.4, color="teal", label="RMSE cruzado")
+    ax.set_xticks(x, df["config"])
+    ax.set_ylabel("RMSE campo (µV)")
+    ax.set_title("Campo de superficie en la malla compartida "
+                 "(heatmap predicho)")
+    ax.grid(axis="y", alpha=0.4)
+    for i, (d, c, ve) in enumerate(zip(df["diag"], df["cross"], df["ve_cross"])):
+        ax.annotate(f"{d:.1f}|{c:.1f}", xy=(i, max(d, c)), xytext=(0, 3),
+                    textcoords="offset points", ha="center", fontsize=8)
+        ax.text(i, -max(d, c) * 0.06, f"VE={ve:.3f}", ha="center",
+                va="top", fontsize=8, color="darkred")
+    ax.legend(frameon=False, loc="upper left")
+    fig.tight_layout()
+    return fig
+
+
+def plot_multiconfig_surface(metrics_surface_df: pd.DataFrame,
+                             run_dir: Path) -> None:
+    _save(multiconfig_surface_fig(metrics_surface_df), run_dir,
+          "multiconfig_surface.png")
+
+
 def multiconfig_scalp_fig(
     model,
     data,
@@ -444,3 +505,175 @@ def plot_multiconfig_scalps(model, data, run_dir: Path,
         fig.savefig(run_dir / "figs" / f"scalp_{label}.png", dpi=140,
                     bbox_inches="tight")
         plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Comparación multi-runs (variantes del transformador, sujetos 1-12)
+# ---------------------------------------------------------------------------
+def _route_tables(metrics_df: pd.DataFrame,
+                  value_col: str = "rmse") -> pd.DataFrame:
+    """Recuadra ``(origen, destino) -> valor`` en una tabla KINDS x KINDS."""
+    table = pd.DataFrame(index=KINDS, columns=KINDS, dtype=float)
+    for _, row in metrics_df.iterrows():
+        table.loc[row["origen"], row["destino"]] = row[value_col]
+    return table
+
+
+def multi_run_heatmap_fig(
+    runs: list[Path],
+    value_col: str = "rmse",
+    unit_scale: float = 1e6,
+) -> plt.Figure:
+    """Facets de heatmap por ejecución/variante (RMSE µV en log10 o r).
+
+    Compara las 4x4 rutas de cada corrida lado a lado. Para ``rmse`` se pasa
+    a µV y se aplica ``log10``; el texto muestra el valor en escala física.
+    """
+    labels = [r.name for r in runs]
+    cols = 2
+    rows = int(np.ceil(len(labels) / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(6.4 * cols, 5.2 * rows),
+                             squeeze=False)
+    axes = axes.ravel()
+    for ax, (label, run) in zip(axes, zip(labels, runs)):
+        mf = pd.read_csv(run / "metrics_test.csv")
+        table = _route_tables(mf, value_col) * unit_scale
+        vals = np.log10(table.fillna(1e-30).values.astype(float) + 1e-30)
+        im = ax.imshow(vals, cmap="viridis", aspect="auto")
+        ax.set_xticks(range(len(KINDS)), [KIND_LABELS[k] for k in KINDS],
+                      fontsize=7)
+        ax.set_yticks(range(len(KINDS)), [KIND_LABELS[k] for k in KINDS],
+                      fontsize=7)
+        ax.set_xlabel("Destino"); ax.set_ylabel("Origen", fontsize=8)
+        ax.set_title(label, fontsize=10)
+        vmin, vmax = vals.min(), vals.max()
+        for i in range(len(KINDS)):
+            for j in range(len(KINDS)):
+                val = table.values[i, j]
+                if not np.isfinite(val):
+                    continue
+                bright = (vals[i, j] - vmin) / (vmax - vmin + 1e-15) > 0.55
+                color = "white" if bright else "black"
+                if value_col == "r":
+                    fmt = f"{val:.3f}"
+                else:
+                    fmt = f"{val:.1f}".replace(".", ",")
+                ax.text(j, i, fmt, ha="center", va="center", color=color,
+                        fontsize=7)
+        fig.colorbar(im, ax=ax, label=f"log10({value_col})", pad=0.015)
+    for ax in axes[len(labels):]:
+        ax.axis("off")
+    unit = "µV" if value_col == "rmse" else "1"
+    fig.suptitle(f"{value_col} por ruta y variante (×{unit})", y=0.99)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    return fig
+
+
+def multi_run_consistency_fig(runs: list[Path]) -> plt.Figure:
+    """Barras del error de composición (mean/max) por variante.
+
+    Lee ``consistency.csv`` de cada corrida: la variante ``group`` debe dar
+    error casi 0 exacto; ``free``/``projected``, finito pero pequeño si la
+    data es informativa. El baseline analítico ``T_d pinv(T_s)`` no es un
+    grupo (error ≈ 1).
+    """
+    summ = []
+    for run in runs:
+        csv = run / "consistency.csv"
+        if not csv.exists():
+            continue
+        df = pd.read_csv(csv)
+        comp = df["comp_medio"]
+        summ.append({"variante": run.name,
+                     "comp_medio": float(comp.mean()),
+                     "comp_max": float(df["comp_max"].max())})
+    if not summ:
+        fig, ax = plt.subplots(figsize=(7, 3))
+        ax.text(0.5, 0.5, "sin consistency.csv", ha="center", va="center")
+        ax.axis("off")
+        return fig
+    df = pd.DataFrame(summ)
+    x = np.arange(len(df))
+    width = 0.38
+    fig, ax = plt.subplots(figsize=(len(df) * 1.9 + 2, 4.6))
+    ax.bar(x - width / 2, df["comp_medio"], width, color="teal",
+           label="media tripletes")
+    ax.bar(x + width / 2, df["comp_max"], width, color="coral",
+           label="máximo tripletes")
+    ax.set_xticks(x, df["variante"])
+    ax.set_ylabel("error de composición (rel.)")
+    ax.set_title("Consistencia de composición: A_sd A_du vs A_su")
+    ax.axhline(1.0, color="gray", ls="--", lw=1,
+               label="baseline analítico ≈ 1")
+    ax.legend(frameon=False)
+    ax.grid(axis="y", alpha=0.4)
+    for i, (me, mx) in enumerate(zip(df["comp_medio"], df["comp_max"])):
+        ax.annotate(f"{me:.3f}", xy=(i - width / 2, me), xytext=(0, 3),
+                    textcoords="offset points", ha="center", fontsize=8)
+        ax.annotate(f"{mx:.3f}", xy=(i + width / 2, mx), xytext=(0, 3),
+                    textcoords="offset points", ha="center", fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def _best_val_loss(run: Path):
+    csv = run / "history.csv"
+    if not csv.exists():
+        return None, None
+    df = pd.read_csv(csv)
+    col = [c for c in df.columns if c.startswith("val_loss_")]
+    if not col:
+        return None, None
+    b = df[col[0]].idxmin()
+    return float(df[col[0]][b]), b + 1  # (mejor val, época de la mejor)
+
+
+def multi_run_learning_fig(runs: list[Path]) -> plt.Figure:
+    """Curvas de validación superpuestas de varias variantes (misma data).
+
+    Usa la pérdida estandarizada de validación guardada en ``history.csv``.
+    """
+    fig, ax = plt.subplots(figsize=(8.2, 4.8))
+    colors = ["rebeccapurple", "coral", "teal", "gold", "steelblue"]
+    for color, run in zip(colors, runs):
+        csv = run / "history.csv"
+        if not csv.exists():
+            continue
+        df = pd.read_csv(csv)
+        col = [c for c in df.columns if c.startswith("val_loss_")]
+        if not col:
+            continue
+        ax.plot(df[col[0]], label=run.name, color=color, lw=2)
+    ax.set_xlabel("Época")
+    ax.set_ylabel("val_loss_estandarizada")
+    ax.set_title("Validación por variante (sujetos 1-12)")
+    ax.legend(frameon=False)
+    ax.grid(alpha=0.4)
+    fig.tight_layout()
+    return fig
+
+
+def plot_multi_run_heatmap(runs: list[Path], out: Path,
+                           value_col: str = "rmse") -> None:
+    fig = multi_run_heatmap_fig(runs, value_col=value_col)
+    out.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out / f"multi_heatmap_{value_col}.png", dpi=140,
+                bbox_inches="tight")
+    plt.close(fig)
+    log.info("Figura guardada: %s", out / f"multi_heatmap_{value_col}.png")
+
+
+def plot_multi_run_consistency(runs: list[Path], out: Path) -> None:
+    fig = multi_run_consistency_fig(runs)
+    out.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out / "multi_consistency.png", dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Figura guardada: %s", out / "multi_consistency.png")
+
+
+def plot_multi_run_learning(runs: list[Path], out: Path) -> None:
+    fig = multi_run_learning_fig(runs)
+    out.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out / "multi_learning_val.png", dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Figura guardada: %s", out / "multi_learning_val.png")

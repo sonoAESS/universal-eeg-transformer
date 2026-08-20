@@ -23,8 +23,8 @@ def is_montage_variant(cfg: EEGTransformConfig) -> bool:
 
 
 def is_multiconfig_variant(cfg: EEGTransformConfig) -> bool:
-    """True si la variante entrena sobre varias configuraciones (``multi_montage``)."""
-    return cfg.model.variant == "multi_montage"
+    """True para variantes que entrenan sobre varias configuraciones."""
+    return cfg.model.variant in ("multi_montage", "multi_heatmap")
 
 
 def load_multiconfig_data(cfg: EEGTransformConfig, ds: MultiReferenceDataset, force: bool = False):
@@ -35,7 +35,12 @@ def load_multiconfig_data(cfg: EEGTransformConfig, ds: MultiReferenceDataset, fo
 
 
 def build_multiconfig_model(cfg, data):
-    """Instancia el autoencoder multi-configuración (core canónico + P_s/Q_s)."""
+    """Instancia el autoencoder multi-configuración (core canónico + P_s/Q_s).
+
+    Para ``multi_heatmap`` además se pasan los mapas de superficie fijos
+    ``S_s`` (electrodos -> malla compartida) y el peso del término de campo.
+    """
+    from ..models.multi_heatmap import MultiHeatmapAutoencoder
     from ..models.multi_montage import MultiMontageAutoencoder
 
     core = build_model(cfg, n_channels=data.configs["canonical"].n_channels,
@@ -43,6 +48,15 @@ def build_multiconfig_model(cfg, data):
     core.ensure_built()
     projections = {l: m.projection for l, m in data.configs.items()}
     out_maps = {l: m.out_map for l, m in data.configs.items()}
+    if cfg.model.variant == "multi_heatmap":
+        surfaces = {
+            l: np.asarray(m.surface, dtype=np.float32) for l, m in data.configs.items()
+        }
+        return MultiHeatmapAutoencoder(
+            core=core, projections=projections, out_maps=out_maps,
+            surfaces=surfaces,
+            surface_loss_weight=cfg.model.surface_loss_weight,
+        )
     return MultiMontageAutoencoder(core=core, projections=projections,
                                    out_maps=out_maps)
 

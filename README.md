@@ -95,6 +95,7 @@ pon `FORCE = True` solo para reentrenar desde cero.
 | `notebooks/montage_leadfield.ipynb` | `config/montage_leadfield.yaml` | unificación por solución inversa (lead field) |
 | `notebooks/montage_heatmap.ipynb` | `config/montage_heatmap.yaml` | unificación por mapas de calor (spline) |
 | `notebooks/multi_montage.ipynb` | `config/multi_montage.yaml` | entrenamiento conjunto y balanceado sobre 19/64/128/256 electrodos |
+| `notebooks/multi_heatmap.ipynb` | `config/multi_heatmap.yaml` | igual + campo de superficie (el topomapa es una salida entrenada) |
 
 Los notebooks de montaje estiman las 4 referencias canónicas (64 canales) desde
 **cualquier configuración de electrodos** (p. ej. 10-20, 19 canales) y muestran
@@ -109,6 +110,13 @@ Las configuraciones están **balanceadas por construcción** (mismas muestras po
 lote), la predicción es intra-configuración (`C_s → C_s`) y la evaluación se
 compara contra la línea base analítica `T_d @ pinv(T_s)` del propio montaje
 (columnas `*_ana`). Física y métricas en `docs/guia_conceptual.md`.
+
+La variante `multi_heatmap` extiende lo anterior con la lectura de la actividad
+como **campo de superficie** sobre una **malla compartida** del cuero cabelludo
+(la interpolación `S_s` de los topomapas): el modelo también se entrena para
+que el *heatmap* predicho sea fiel, no solo cada electrodo por separado. La
+evaluación guarda `metrics_surface_test.csv` (`rmse_field`/`r_field`/`ve_field`
+por ruta y configuración) y `runs/multi_heatmap/multiconfig_surface.png`.
 
 Para abrirlos y ejecutarlos con el entorno del proyecto:
 
@@ -128,7 +136,8 @@ Variantes disponibles en `config/` (vía `model.variant`): `default.yaml`
 de latente `wide.yaml` (128) / `bottleneck.yaml` (32), las variantes de
 **unificación de montajes** `montage_leadfield.yaml` / `montage_heatmap.yaml`,
 y `multi_montage.yaml` (entrenamiento conjunto y balanceado sobre varias
-configuraciones de electrodos a la vez).
+configuraciones de electrodos a la vez) y `multi_heatmap.yaml` (igual + campo
+de superficie/heatmap entrenado sobre la malla compartida).
 Resultados: `docs/results_comparison.md`, `docs/mapping_wip.md` y
 `docs/guia_conceptual.md`.
 
@@ -152,7 +161,8 @@ Resultados: `docs/results_comparison.md`, `docs/mapping_wip.md` y
 │   ├── bottleneck.ipynb         # latente 32
 │   ├── montage_leadfield.ipynb  # unificación por solución inversa (lead field)
 │   ├── montage_heatmap.ipynb    # unificación por mapas de calor (spline)
-│   └── multi_montage.ipynb      # 19/64/128/256 electrodos balanceados
+│   ├── multi_montage.ipynb      # 19/64/128/256 electrodos balanceados
+│   └── multi_heatmap.ipynb      # igual + campo de superficie (heatmap)
 ├── docs/
 │   ├── model_variants.md        # descripción de las variantes de arquitectura
 │   ├── mapping_wip.md           # unificación de montajes (WIP → resultados)
@@ -167,6 +177,7 @@ Resultados: `docs/results_comparison.md`, `docs/mapping_wip.md` y
 │   ├── data/dataset.py          # dataset multi-referencia + splits + caché
 │   ├── models/universal_transformer.py   # autoencoder lineal All-to-All (+ modo montaje)
 │   ├── models/multi_montage.py  # autoencoder multi-configuración (P_s/Q_s fijos)
+│   ├── models/multi_heatmap.py  # multi-config + campo de superficie (S_s → malla)
 │   ├── training/trainer.py      # bucles/callbacks TF
 │   ├── evaluation/{metrics,plots}.py
 │   ├── experiments/montage.py   # experimento de reconstrucción de montajes

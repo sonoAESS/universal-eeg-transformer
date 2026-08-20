@@ -271,3 +271,96 @@ def test_multi_variant_config_validation():
     cfg = EEGTransformConfig.from_dict(bad_latent)
     with pytest.raises(ValueError):
         cfg.validate()
+
+
+def test_multi_heatmap_model_surface_loss_and_config():
+    """Variante ``multi_heatmap``: campo en la malla + pérdida de superficie."""
+    import tensorflow as tf
+
+    from eeg_transform.models.multi_heatmap import MultiHeatmapAutoencoder
+    from eeg_transform.config import MODEL_VARIANTS
+
+    assert "multi_heatmap" in MODEL_VARIANTS
+    cfg = _multi_config()  # multi_montage en 'model', se anula a mano
+    cfg.model.variant = "multi_heatmap"
+    ds = _FakeDataset.make()
+    data = build_multiconfig(ds, cfg, force=True)
+    # mapas de superficie por configuración (malla compartida, n_grid = grid_px²)
+    for l in data.order:
+        n_c = data[l].n_channels
+        assert data[l].surface is not None
+        assert data[l].surface.shape == (data[l].surface.shape[0], n_c)
+    grid_px2 = {l: data[l].surface.shape[0] for l in data.order}
+    assert len(set(grid_px2.values())) == 1  # una sola malla compartida
+
+    core = _core(data)
+    core.ensure_built()
+    model = MultiHeatmapAutoencoder(
+        core=core,
+        projections={l: m.projection for l, m in data.configs.items()},
+        out_maps={l: m.out_map for l, m in data.configs.items()},
+        surfaces={l: m.surface for l, m in data.configs.items()},
+        surface_loss_weight=0.1,
+    )
+    model.compile(optimizer="adam")
+    # una rutina de entrenamiento con el término de superficie en las métricas
+    x = {l: {k: data[l].refs["train"][k] for k in data[l].refs["train"]}
+         for l in data.order}
+    out = model.train_step((x, x))
+    for key in ("loss", "loss_estandarizada", "surface_loss", "mse_real_V2"):
+        assert key in out
+        assert float(out[key]) == float(out[key])  # es finito
+    # round-trip de configuración con surfaces y peso
+    restored = MultiHeatmapAutoencoder.from_config(model.get_config())
+    assert float(restored.surface_loss_weight) == 0.1
+    assert restored.surfaces["canonical"].shape == model.surfaces["canonical"].shape
+
+
+def test_evaluate_multiconfig_surface_routes():
+    from eeg_transform.evaluation import metrics as mtr
+
+    cfg = _multi_config()
+    cfg.model.variant = "multi_heatmap"
+    ds = _FakeDataset.make()
+    data = build_multiconfig(ds, cfg, force=True)
+    core = _core(data)
+    core.ensure_built()
+    model = MultiMontageAutoencoder(
+        core=core,
+        projections={l: m.projection for l, m in data.configs.items()},
+        out_maps={l: m.out_map for l, m in data.configs.items()},
+    )
+    surface = mtr.evaluate_multiconfig_surface_routes(model, data, split="test")
+    assert len(surface) == len(data.order) * 16
+    assert sorted(surface.columns) == sorted(
+        ["config", "origen", "destino", "rmse_field", "r_field", "ve_field"])
+    summ = mtr.summarize_multiconfig_surface(surface)
+    assert set(summ["config"]) == set(data.order)
+    assert "ve_field_cross" in summ.columns and "rmse_field_cross_uV" in summ.columns
+
+
+def test_multi_heatmap_config_validation():
+    import pytest
+
+    # exige method == spline (campo de superficie sobre la malla)
+    bad_method = dict(model={"variant": "multi_heatmap", "latent_dim": 0},
+                      mapping={"configs": ["10-20", "canonical", "dense-8"],
+                               "method": "leadfield"})
+    cfg = EEGTransformConfig.from_dict(bad_method)
+    with pytest.raises(ValueError):
+        cfg.validate()
+
+    # peso de superficie fuera de rango
+    bad_weight = dict(model={"variant": "multi_heatmap", "latent_dim": 0,
+                             "surface_loss_weight": 5.0},
+                      mapping={"configs": ["10-20", "canonical", "dense-8"]})
+    cfg = EEGTransformConfig.from_dict(bad_weight)
+    with pytest.raises(ValueError):
+        cfg.validate()
+
+    # latente debe ser 0/auto
+    bad_latent = dict(model={"variant": "multi_heatmap", "latent_dim": 16},
+                      mapping={"configs": ["10-20", "canonical", "dense-8"]})
+    cfg = EEGTransformConfig.from_dict(bad_latent)
+    with pytest.raises(ValueError):
+        cfg.validate()

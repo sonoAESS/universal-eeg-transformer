@@ -539,9 +539,10 @@ import matplotlib.pyplot as plt
 
 from eeg_transform.experiments.multi import multiconfig_summary
 from eeg_transform.nb import (
-    config_table, evaluate_multiconfig, load_experiment, multiconfig_data,
+    config_table, evaluate_multiconfig, evaluate_multiconfig_surface,
+    load_experiment, multiconfig_data,
     plot_multiconfig_bars, plot_multiconfig_heatmap, plot_multiconfig_scalps,
-    plot_training, train_variant,
+    plot_multiconfig_surface, plot_training, train_variant,
 )
 from eeg_transform.training.trainer import (
     build_multiconfig_model, is_multiconfig_variant,
@@ -558,7 +559,7 @@ FORCE  = False          # True = reentrenar desde cero ignorando el checkpoint
 
 CELL_MULTICONFIG_CONFIG = r"""cfg, ds = load_experiment(CONFIG)
 data = multiconfig_data(cfg, ds)
-assert is_multiconfig_variant(cfg), "Variant {cfg.model.variant} no es multi_montage"
+assert is_multiconfig_variant(cfg), "Variant {cfg.model.variant} no es multi_montage/multi_heatmap"
 print(ds.summary())
 print(multiconfig_summary(data), "\n")
 config_table(cfg).set_index(["sección", "parámetro"])"""
@@ -568,12 +569,13 @@ model = build_multiconfig_model(cfg, ds, data)
 model.ensure_built()
 
 n_params = sum(int(np.prod(v.shape)) for v in model.trainable_variables)
-print(f"Variante: {cfg.model.variant}  |  latente: {cfg.model.latent_dim}  |  "
-      f"configs: {len(model.config_labels)}  |  parámetros: {n_params:,}")
-for lbl in model.config_labels:
+print(f"Variante: {cfg.model.variant}  |  latente: {cfg.model.n_canonical}  |  "
+      f"configs: {len(model.configs)}  |  parámetros: {n_params:,}")
+for lbl in model.configs:
     A = model.transfer_matrices(lbl)
-    print(f"  {lbl:10s} P {A['source_in'].shape}  Q {A['target_out'].shape}  "
-          f"A_s→s {A['transfer'].shape}")
+    m = next(iter(A.values()))
+    print(f"  {lbl:10s} P {model.projections[lbl].shape}  "
+          f"Q {model.out_maps[lbl].shape}  A_s→d {m.shape}")
 print("La predicción es INTRA-configuración: C_s → C_s (misma disposición).")
 _ = model  # se reutiliza en train/eval"""
 
@@ -607,7 +609,25 @@ CELL_MULTICONFIG_SCALPS = r"""# Mapas de calor del cuero cabelludo por configura
 # (unipolar local, bipolar local, CAR, REST); columnas: observación →
 # modelo (predicción intra-config) → verdad. El ancla REST es la referencia
 # infinita simulada y las demás se derivan de sus operadores.
-plot_multiconfig_scalps(cfg, model, data=data)
+for label, fig in plot_multiconfig_scalps(cfg, model, data=data).items():
+    print(f"--- {label} ---")
+    plt.show()"""
+
+CELL_MULTICONFIG_SURFACE_EVAL = r"""# Campo de superficie (solo ``multi_heatmap``): RMSE/r/VE del HEATMAP.
+# La lectura se interpola con la matriz fija S_s (electrodos -> malla
+# compartida); el término de pérdida del entrenamiento actúa sobre estas
+# "manchas", no solo sobre cada electrodo por separado.
+surface_df, surf_summary = evaluate_multiconfig_surface(model, data)
+
+print("=== CAMPO DE SUPERFICIE (TEST) — RMSE en µV sobre la malla ===")
+print(surf_summary.round(3).to_string(index=False))
+print("\n=== DETALLE POR RUTA (campo, malla compartida) ===")
+print(surface_df.round(9).to_string(index=False))"""
+
+CELL_MULTICONFIG_SURFACE_FIG = r"""# Barras del campo de superficie por configuración: RMSE en la malla y VE
+# del heatmap predicho (diagonal y cruzada entre referencias).
+plot_multiconfig_surface(surface_df,
+                         title=f"Campo de superficie (heatmap) — {cfg.model.variant}")
 plt.show()"""
 
 
@@ -792,9 +812,29 @@ referencia distinta (conversión de referencia intra-configuración).
   resultados): `docs/guia_conceptual.md`.
 """
 
+_MULTI_HEATMAP_EXTRA = r"""
+### Multi_heatmap: el "heatmap" es una salida entrenada
+
+La variante **`multi_heatmap`** añade a `multi_montage` la lectura de la
+actividad como **campo de superficie sobre una malla compartida** del cuero
+cabelludo. Para cada configuración la observación se interpola a los
+`grid_px²` nodos con la matriz fija `S_s (C_s → n_grid)` (la misma
+`scalp_grid_matrix` de los topomapas):
+
+$$\hat F^{(d)}_s = \hat x^{(d)}_s\, S_s^\top$$
+
+El término de pérdida es el MSE estandarizado **sobre el patrón espacial**
+(peso `model.surface_loss_weight = 0.1`), de modo que el modelo no solo acierta
+electrodo a electrodo sino también la forma de las "manchas". Al ser `S_s`
+fijo, todos los campos viven en la **misma malla**: los heatmaps de 19/64/128/
+256 canales son comparables entre sí.
+"""
+
 
 def _build_multiconfig_markdown(variant: str) -> str:
     text = _MULTICONFIG_MARKDOWN
+    if variant == "multi_heatmap":
+        text = text.rstrip() + "\n" + _MULTI_HEATMAP_EXTRA
     return text
 
 
@@ -848,10 +888,25 @@ def build_multiconfig_notebook(variant: str) -> nbf.NotebookNode:
         _code_cell(CELL_MULTICONFIG_HEATMAP),
         _code_cell(CELL_MULTICONFIG_BARS),
         _code_cell(CELL_MULTICONFIG_SCALPS),
+    ]
+    if variant == "multi_heatmap":
+        cells += [
+            _md_cell("## 6. Campo de superficie (heatmap\n\n"
+                     "La lectura como campo en la malla compartida es una salida "
+                     "**entrenada** (peso `surface_loss_weight`): aquí se mide "
+                     "RMSE/r/VE del patrón espacial y se compara por "
+                     "configuración."),
+            _code_cell(CELL_MULTICONFIG_SURFACE_EVAL),
+            _code_cell(CELL_MULTICONFIG_SURFACE_FIG),
+        ]
+    cells += [
         _md_cell("## Conclusiones\n\n"
                  "Consulte `docs/guia_conceptual.md` (conceptos y métricas), "
                  "`docs/results_comparison.md` (comparativa de variantes) y los "
-                 "resultados guardados en `runs/multi_montage/metrics_test.csv`."),
+                 "resultados guardados en "
+                 f"`runs/{variant}/metrics_test.csv` (y "
+                 f"`runs/{variant}/metrics_surface_test.csv` para "
+                 f"`multi_heatmap`)."),
     ]
     nb["cells"] = cells
     return nb
@@ -871,7 +926,7 @@ def main() -> None:
         with path.open("w", encoding="utf-8") as f:
             nbf.write(nb, f)
         print(f"Generado: {path}")
-    for variant in ("multi_montage",):
+    for variant in ("multi_montage", "multi_heatmap"):
         nb = build_multiconfig_notebook(variant)
         path = OUT_DIR / f"{variant}.ipynb"
         with path.open("w", encoding="utf-8") as f:

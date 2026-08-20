@@ -164,7 +164,8 @@ def __post_init__(self):
 #                    configuración, las medidas con otra referencia.
 MODEL_VARIANTS: tuple[str, ...] = (
     "free", "group", "projected", "soft_group",
-    "montage_leadfield", "montage_heatmap", "multi_montage",
+    "montage_leadfield", "montage_heatmap",
+    "multi_montage", "multi_heatmap",
 )
 
 # Métodos de proyección entre montajes (ver mapping.build_projection).
@@ -187,6 +188,11 @@ class ModelConfig:
     # Peso de la penalización de consistencia de composición (soft_group):
     # termina la física de grupo como pérdida suave en lugar de estructura.
     comp_penalty_weight: float = 0.0
+    # Peso del término de pérdida en el CAMPO DE SUPERFICIE (latente del
+    # "heatmap") para la variante ``multi_heatmap``: además del MSE por
+    # electrodo, se ajusta la actividad interpolada sobre la malla del cuero
+    # cabelludo (patrón espacial suave, las "manchas" del topomapa).
+    surface_loss_weight: float = 0.1
 
     def __post_init__(self):
         # PyYAML puede dejar '1e-3' como cadena; se coerciona a numérico.
@@ -199,7 +205,8 @@ class ModelConfig:
             v = getattr(self, name)
             if isinstance(v, str):
                 setattr(self, name, v.strip().lower() in ("true", "1", "yes"))
-        for name in ("kernel_regularizer_l2", "learning_rate", "comp_penalty_weight"):
+        for name in ("kernel_regularizer_l2", "learning_rate", "comp_penalty_weight",
+                     "surface_loss_weight"):
             try:
                 setattr(self, name, float(getattr(self, name)))
             except (TypeError, ValueError):
@@ -310,10 +317,10 @@ class EEGTransformConfig:
                     f"mapping.method == '{expected}', no "
                     f"'{self.mapping.method}'."
                 )
-        if self.model.variant == "multi_montage":
+        if self.model.variant in ("multi_montage", "multi_heatmap"):
             if "canonical" not in set(self.mapping.configs):
                 raise ValueError(
-                    "multi_montage requiere la configuración 'canonical' "
+                    f"{self.model.variant} requiere la configuración 'canonical' "
                     "en mapping.configs (es el espacio del autoencoder)."
                 )
             labels = set(self.mapping.configs)
@@ -323,15 +330,26 @@ class EEGTransformConfig:
                 if lab == "10-20" or lab == "10-10" or lab.startswith("dense-"):
                     continue
                 raise ValueError(
-                    f"Configuración '{lab}' no soportada en multi_montage "
+                    f"Configuración '{lab}' no soportada en {self.model.variant} "
                     "(válidas: '10-20', '10-10', 'canonical' o 'dense-<N>')."
                 )
             if self.mapping.multi_max_samples_per_split < 1_000:
                 raise ValueError(
                     "multi_max_samples_per_split debe ser >= 1000 muestras."
                 )
-        if self.model.variant == "multi_montage" and self.model.latent_dim not in (0, -1):
-            raise ValueError("variant='multi_montage' requiere latent_dim 0/auto.")
+        if self.model.variant == "multi_heatmap":
+            if self.mapping.method != "spline":
+                raise ValueError(
+                    "variant='multi_heatmap' requiere mapping.method == "
+                    "'spline' (el campo de superficie es la interpolación "
+                    "sobre la malla del cuero cabelludo)."
+                )
+            if not (0.0 <= self.model.surface_loss_weight <= 1.0):
+                raise ValueError(
+                    "surface_loss_weight debe estar en (0, 1] para multi_heatmap."
+                )
+        if self.model.variant in ("multi_montage", "multi_heatmap") and self.model.latent_dim not in (0, -1):
+            raise ValueError(f"variant='{self.model.variant}' requiere latent_dim 0/auto.")
         if self.mapping.method not in MAPPING_METHODS:
             raise ValueError(
                 f"mapping.method debe ser una de {MAPPING_METHODS}, "

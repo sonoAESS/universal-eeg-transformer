@@ -42,7 +42,12 @@ from ..config import EEGTransformConfig, REFERENCE_KINDS
 from ..data.dataset import MultiReferenceDataset
 from ..leadfield import compute_lead_field
 from ..logging_conf import get_logger
-from ..mapping import build_projection, select_subset, spherical_spline_matrix
+from ..mapping import (
+    build_projection,
+    scalp_grid_matrix,
+    select_subset,
+    spherical_spline_matrix,
+)
 from ..references import build_reference_matrix
 from .montage import MONTAGE_10_20, MONTAGE_10_10_39
 
@@ -149,6 +154,7 @@ class MontageConfig:
     leadfield: np.ndarray
     unipolar_ref_index: int
     refs: dict[str, dict[str, np.ndarray]]
+    surface: np.ndarray | None = None
 
 
 @dataclass
@@ -306,6 +312,16 @@ def _build_config_refs(
     return refs
 
 
+def _config_surface(positions: np.ndarray, grid_px: int) -> np.ndarray:
+    """Mapa fijo ``(grid_px², C_s)``: electrodos de la config. -> malla compartida.
+
+    Es la matriz de interpolación al heatmap del cuero cabelludo (la misma
+    ``scalp_grid_matrix`` usada por las figuras), de modo que el campo de
+    superficie que se lee por configuración vive siempre en la misma malla.
+    """
+    return scalp_grid_matrix(positions, grid_px=grid_px)[0].astype(np.float32)
+
+
 def build_multiconfig(
     ds: MultiReferenceDataset,
     cfg: EEGTransformConfig,
@@ -353,6 +369,12 @@ def build_multiconfig(
         cache_file = cache_dir / f"{label}.npz"
         if cache_file.exists() and not force:
             configs[label] = _load_config_cache(cache_file, spec, ds, budget)
+            if configs[label].surface is None:
+                configs[label].surface = _config_surface(
+                    spec["positions"], cfg.mapping.grid_px
+                ).astype(np.float32)
+                log.info("Mapa de superficie de '%s' recalculado (caché previa).",
+                         label)
             log.info("Configuración '%s' cargada de caché (%s)", label, cache_file)
             continue
         refs = _build_config_refs(ds, spec)
@@ -366,6 +388,7 @@ def build_multiconfig(
             leadfield=spec["leadfield"],
             unipolar_ref_index=spec["unipolar_ref_index"],
             refs=refs,
+            surface=_config_surface(spec["positions"], cfg.mapping.grid_px),
         )
         _save_config_cache(mc, ds, cache_file)
         configs[label] = mc
@@ -397,6 +420,8 @@ def _save_config_cache(mc: MontageConfig, ds: MultiReferenceDataset, path: Path)
         "out_map": mc.out_map,
         "leadfield": mc.leadfield,
         "unipolar_ref_index": np.int16(mc.unipolar_ref_index),
+        "surface": mc.surface.astype(np.float32) if mc.surface is not None
+        else np.zeros(0, dtype=np.float32),
     }
     for split in ("train", "val", "test"):
         for k in KINDS:
@@ -414,6 +439,7 @@ def _load_config_cache(
             }
             for split in ("train", "val", "test")
         }
+        surface = d["surface"] if "surface" in d and d["surface"].size else None
         return MontageConfig(
             label=str(d["label"]),
             names=list(d["names"]),
@@ -424,6 +450,7 @@ def _load_config_cache(
             leadfield=d["leadfield"],
             unipolar_ref_index=int(d["unipolar_ref_index"]),
             refs=refs,
+            surface=surface,
         )
 
 

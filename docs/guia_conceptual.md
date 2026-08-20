@@ -146,6 +146,7 @@ igual en la retropropagación. También se registran métricas en unidades reale
 | `soft_group` | Igual que `free` pero con penalización suave de composición en la pérdida. | Compromiso precisión/física. |
 | `montage_*` | Un montaje fuente de `C_s` electrodos entra por una **proyección fija** `P` y el modelo predice las referencias canónicas (64). | Unificar un montaje concreto al espacio canónico. |
 | `multi_montage` | Entrena **varias configuraciones a la vez** (19/64/128/256) con el mismo autoencoder; cada una se embebe con `P_s` y se lee con `Q_s`, y el modelo predice referencias **en la propia configuración**. | Un modelo universal para cualquier configuración de electrodos. |
+| `multi_heatmap` | Igual que `multi_montage` + **campo de superficie**: además del MSE por electrodo, la actividad se lee y se entrena como *heatmap* sobre una **malla compartida** del cuero cabelludo (la de los topomapas). | Un modelo universal cuyo topomapa también es fiel, no solo los electrodos. |
 
 ### Variante `multi_montage` (nueva)
 Ecuación por configuración `s`:
@@ -166,6 +167,34 @@ Configuraciones disponibles:
 - `canonical`: los 64 electrodos nativos (10-10).
 - `dense-N`: N posiciones simuladas cuasi-uniformes sobre el casquete (p. ej.
   `dense-128`, `dense-256`), coherentes en cobertura con el montaje canónico.
+
+### Variante `multi_heatmap`: el topomapa es una salida entrenada
+
+`multi_heatmap` = `multi_montage` + lectura de la actividad como **campo de
+superficie** sobre una **malla compartida** del cuero cabelludo. Para cada
+configuración `s`, la matriz fija `S_s` (C_s → n_grid) lleva un vector de
+electrodos a los `grid_px²` nodos de la malla (la misma interpolación
+esférica de `scalp_grid_matrix` y de los topomapas):
+
+```
+F̂(d)_s = x̂(d)_s · S_sᵀ          (campo en la malla, n_grid por instante)
+```
+
+La pérdida combina el MSE estandarizado por electrodo (idéntico a `multi_montage`)
+con el MSE estandarizado **sobre el campo** valuado en la malla, con peso
+`model.surface_loss_weight` (0.1):
+
+```
+loss = <Z-loss por ruta (electrodos)> + 0.1 · <Z-loss por ruta (campo)>
+```
+
+Como `S_s` es fijo e independiente de la referencia, **todos los campos viven
+en la misma malla**: los heatmaps de 19/64/128/256 canales son comparables en
+una sola figura. Requiere `mapping.method: spline` (el "heatmap" presupone la
+interpolación suave sobre el casquete).
+
+Los resultados se guardan en `runs/<variante>/metrics_surface_test.csv` con
+columnas `rmse_field`/`r_field`/`ve_field` por ruta y configuración.
 
 ---
 
@@ -261,6 +290,7 @@ exacta puede hacer sin aprender. El modelo debe igualarlo (o mejorarlo, pues
 | Modelo > analítico (VE mayor, RMSE menor) | El modelo regulariza mejor que `pinv` (típico en bipolar, mal condicionado). |
 | `group` con error de composición ~0 | La física de grupo se satisface exactamente. |
 | `multi_montage` con VE alta en *todas* las configuraciones | El autoencoder compartido generaliza entre 19 y 256 electrodos. |
+| `multi_heatmap` con `ve_field_cross` alto **y** `rmse_field_cross_uV` bajo | El topomapa predicho es fiel en la malla compartida, no solo electrodo a electrodo. |
 
 Regla práctica: **nunca mires el RMSE sin su línea base analítica ni sin la
 amplitud de la señal**; usa VE para calibrar la calidad relativa y `r` para la
@@ -280,12 +310,16 @@ split.
 - `src/eeg_transform/leadfield.py` — lead field multicapa y REST.
 - `src/eeg_transform/mapping.py` — splines, problema inverso, proyección.
 - `src/eeg_transform/experiments/multi.py` — generador multi-configuración.
-- `src/eeg_transform/models/` — arquitecturas (incl. `multi_montage.py`).
+- `src/eeg_transform/models/` — arquitecturas (incl. `multi_montage.py`,
+  `multi_heatmap.py`).
 - `config/multi_montage.yaml` — configuración de entrenamiento multi-config.
+- `config/multi_heatmap.yaml` — igual + campo de superficie (`surface_loss_weight`).
 
 Para entrenar la variante multi-configuración:
 
 ```bash
 PYTHONPATH=src entorno/bin/python -m eeg_transform.cli pipeline \
     -c config/multi_montage.yaml --force
+PYTHONPATH=src entorno/bin/python -m eeg_transform.cli eval \
+    -c config/multi_heatmap.yaml    # también genera metrics_surface_test.csv
 ```

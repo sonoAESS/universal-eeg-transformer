@@ -198,14 +198,47 @@ def plot_multiconfig_bars(metrics_df: pd.DataFrame, title: str):
 def plot_multiconfig_scalps(cfg: EEGTransformConfig, model, data=None,
                             split: str = "test",
                             n_samples: int | None = None):
-    """Mapas de calor del cuero cabelludo por configuración."""
+    """Mapas de calor del cuero cabelludo por configuración (uno por label).
+
+    Returns
+    -------
+    ``dict {label: Figure}`` con los topomapas de cada configuración
+    no-canónica (Obs → Modelo → Verdad, intra-configuración).
+    """
     plots.set_plot_backend("inline")
     if data is None:
         raise ValueError("plot_multiconfig_scalps requiere `data`.")
-    return plots.multiconfig_scalp_fig(
-        model, data, cfg, split=split,
-        n_samples=n_samples or cfg.evaluation.n_plot_samples,
-    )
+    n_samples = n_samples or cfg.evaluation.n_plot_samples
+    return {
+        label: plots.multiconfig_scalp_fig(
+            model, data, label, split=split,
+            n_samples=n_samples, grid_px=cfg.mapping.grid_px,
+        )
+        for label in data.order
+        if label != "canonical"
+    }
+
+
+def evaluate_multiconfig_surface(
+    model, data, split: str = "test",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Métricas del campo de superficie (malla compartida) por configuración.
+
+    Returns
+    -------
+    ``(metrics_surface_df, summary)`` con RMSE/r/VE del "heatmap" predicho
+    (patrón espacial), válido solo para la variante ``multi_heatmap``.
+    """
+    surface_df = metrics.evaluate_multiconfig_surface_routes(model, data,
+                                                             split=split)
+    summary = metrics.summarize_multiconfig_surface(surface_df)
+    return surface_df, summary
+
+
+def plot_multiconfig_surface(metrics_surface_df: pd.DataFrame, title: str):
+    """Figura de barras del campo de superficie por configuración."""
+    plots.set_plot_backend("inline")
+    return plots.multiconfig_surface_fig(metrics_surface_df)
 
 
 def summarize(metrics_df: pd.DataFrame) -> pd.DataFrame:

@@ -333,6 +333,66 @@ def summarize_multiconfig(metrics_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _grid_valid(grid_px: int) -> np.ndarray:
+    """Máscara del disco de la malla compartida (igual que ``scalp_grid_matrix``)."""
+    x = np.linspace(-1.0, 1.0, grid_px)
+    gx, gy = np.meshgrid(x, x)
+    return (gx.ravel() ** 2 + gy.ravel() ** 2) <= 1.0
+
+
+def evaluate_multiconfig_surface_routes(
+    model, data, split: str = "test",
+) -> pd.DataFrame:
+    """Métricas en el CAMPO DE SUPERFICIE (malla compartida) por ruta.
+
+    Para cada configuración y ruta ``s->d`` se interpolan predicción y verdad
+    a la malla del cuero cabelludo con la matriz fija ``S_s`` (electrodos ->
+    ``n_grid``) y se estiman RMSE/r/VE sobre el **patrón espacial** (solo nodos
+    válidos del disco). Cuantifica cuán fiel es el "heatmap" predicho, no solo
+    cada electrodo individualmente.
+    """
+    grid_px = int(round(np.sqrt(data.configs["canonical"].surface.shape[0])))
+    valid = _grid_valid(grid_px)
+    rows = []
+    for label in data.order:
+        mc = data.configs[label]
+        S = mc.surface.astype(np.float64)[valid, :]          # (n_valid, C_s)
+        targets = {k: mc.refs[split][k] for k in KINDS}
+        preds = predict_multiconfig_routes(model, data, split)[label]
+        for s in KINDS:
+            for d in KINDS:
+                f_true = targets[d] @ S.T
+                f_pred = preds[s][d] @ S.T
+                st = _route_stats(f_true, f_pred)
+                rows.append({
+                    "config": label,
+                    "origen": s,
+                    "destino": d,
+                    "rmse_field": st["rmse"],
+                    "r_field": st["r"],
+                    "ve_field": st["ve"],
+                })
+    return pd.DataFrame(rows)
+
+
+def summarize_multiconfig_surface(metrics_df: pd.DataFrame) -> pd.DataFrame:
+    """Resumen del campo de superficie por configuración (diag/cruzada)."""
+    rows = []
+    for label, g in metrics_df.groupby("config", sort=False):
+        diag = g[g["origen"] == g["destino"]]
+        off = g[g["origen"] != g["destino"]]
+        rows.append({
+            "config": label,
+            "rmse_field_diag_uV": diag["rmse_field"].mean() * 1e6,
+            "r_field_diag": diag["r_field"].mean(),
+            "ve_field_diag": diag["ve_field"].mean(),
+            "rmse_field_cross_uV": off["rmse_field"].mean() * 1e6,
+            "r_field_cross": off["r_field"].mean(),
+            "ve_field_cross": off["ve_field"].mean(),
+        })
+    return pd.DataFrame(rows)
+
+
 def summarize(metrics_df: pd.DataFrame, label: str) -> pd.DataFrame:
     """Resumen de métricas por tipo de ruta (diagonal / cruzada)."""
     diag = metrics_df[metrics_df["origen"] == metrics_df["destino"]]

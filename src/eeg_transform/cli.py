@@ -92,6 +92,21 @@ def cmd_eval(cfg) -> None:
         plots.plot_multiconfig_heatmap(metrics_df, run_dir)
         plots.plot_multiconfig_bars(metrics_df, run_dir)
         plots.plot_multiconfig_scalps(model, data, run_dir)
+
+        if cfg.model.variant == "multi_heatmap":
+            surface_df = metrics.evaluate_multiconfig_surface_routes(
+                model, data, split="test")
+            surf_summ = metrics.summarize_multiconfig_surface(surface_df)
+            print("\n======== CAMPO DE SUPERFICIE (TEST) ========")
+            print(surf_summ.to_string(formatters={
+                "rmse_field_diag_uV": "{:.3f}".format,
+                "r_field_diag": "{:.4f}".format,
+                "ve_field_diag": "{:.3f}".format,
+                "rmse_field_cross_uV": "{:.3f}".format,
+                "r_field_cross": "{:.4f}".format,
+                "ve_field_cross": "{:.3f}".format}))
+            surface_df.to_csv(run_dir / "metrics_surface_test.csv", index=False)
+            plots.plot_multiconfig_surface(surface_df, run_dir)
         return
 
     montage = build_montage_inputs(cfg, ds) if is_montage_variant(cfg) else None
@@ -152,7 +167,7 @@ def cmd_eval(cfg) -> None:
 
     history_csv = run_dir / "history.csv"
     if history_csv.exists():
-        plots.plot_learning_curves(history_csv, run_dir)
+        plots.plot_learning_curves(history_csv, run_dir, run_label=run_dir.name)
     plots.plot_heatmap(metrics_df, "rmse", "RMSE real por ruta (V)",
                        run_dir, "heatmap_rmse.png")
     plots.plot_heatmap(err_matrix, "error_fro_rel",
@@ -224,6 +239,22 @@ def cmd_compare(runs: list[str]) -> None:
         return
     df = pd.DataFrame(rows)
     print(df.round(4).to_string(index=False))
+
+    # Figuras comparativas en runs/compare/figs
+    from .evaluation import plots
+
+    runs_paths = [Path(r) for r in runs if (Path(r) / "metrics_test.csv").exists()]
+    out = Path("runs") / "compare"
+    if len(runs_paths) >= 2:
+        plots.plot_multi_run_heatmap(runs_paths, out, value_col="rmse")
+        plots.plot_multi_run_heatmap(runs_paths, out, value_col="r")
+        plots.plot_multi_run_consistency(runs_paths, out)
+        plots.plot_multi_run_learning(runs_paths, out)
+    elif runs_paths:
+        run0 = runs_paths[0]
+        history = run0 / "history.csv"
+        if history.exists():
+            plots.plot_learning_curves(history, out, run_label=run0.name)
 
 
 def cmd_pipeline(cfg, force: bool) -> None:
