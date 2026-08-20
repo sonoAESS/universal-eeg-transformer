@@ -86,3 +86,70 @@ y convergen a ella con la data; `group` representa su inversa y por eso la
 comparación `error_fro_rel` con las matrices analíticas es menormente
 significativa para `group` (0.11) — la métrica que lo distingue es `comp`:
 exacta por construcción.
+---
+
+# Variante `multi_heatmap`: campo de superficie multi-configuración
+
+Un solo modelo comparte un core canónico (64 ch) y proyecciones fijas
+`P_s`/`Q_s` por configuración de electrodos: **19 (10-20), 64 (canonical),
+128 y 256 (densos mapeados por spline)**, con las 4 referencias
+intra-configuración. Entrenado con sujetos 1–12, 60 épocas; la novedad es el
+término `surface_loss` (peso 0.1): MSE estandarizado del **campo espacial** en
+la malla compartida (matriz fija electrodos→malla 48×48), no solo de cada
+electrodo.
+
+```bash
+PYTHONPATH=src entorno/bin/python -m eeg_transform.cli \
+  -c config/multi_heatmap.yaml pipeline --force
+```
+
+Artifacts (`runs/multi_heatmap/`): `metrics_test.csv` (rutas por config),
+`metrics_surface_test.csv` (campo en la malla), figs `multiconfig_*.png` y
+`scalp_*.png` (Obs → Modelo → Verdad por configuración).
+
+## Resultados (test)
+
+| config    | rmse diag µV | rmse cross µV | r diag | r cross | peor ruta (cross) |
+|-----------|-------------|---------------|--------|---------|-------------------|
+| 10-20     | 4.6  | 7.8  | 0.977 | 0.938 | rest→bipolar 0.85 |
+| canonical | 11.7 | 14.5 | 0.853 | 0.807 | bipolar→rest 0.56 |
+| dense-128 | 6.9  | 8.5  | 0.786 | 0.587 | bipolar→rest 0.07 |
+| dense-256 | 6.9  | 7.6  | 0.727 | 0.593 | bipolar→rest 0.18 |
+
+Campo de superficie (malla): 10-20 `r_diag 0.97 / r_cross 0.93`; canonical
+`0.86 / 0.81`; dense `0.51–0.64 / 0.26–0.34` (RMSE en malla 150–230 µV).
+
+## Interpretación
+
+* **La lectura espacial es coherente y aprendible donde las referencias
+  portan información.** En 10-20 el modelo reproduce tanto cada electrodo
+  (r_cross 0.94) como el campo en la malla (0.93): el `surface_loss` no es
+  decorativo, entrena una lectura intrínsecamente espacial.
+
+* **El compartir el core canónico cuesta en las rutas difíciles.** La misma
+  ruta REST que en el modelo dedicado (`free`, 64 ch) daba `r 0.9997`, aquí
+  cae a `r ~0.56–0.64` en `canonical`. El autoencoder compartido reparte
+  capacidad entre 4 configuraciones; el modo REST (más "ruidoso", casi
+  constante en parte del mapa) es el que sufre primero.
+
+* **En las configuraciones densas mapeadas por spline el REST es
+  irrepresentable por construcción.** La línea base analítica
+  `T_d·pinv(T_s)` también falla ahí (`r_ana 0.17–0.35`, `ve −48`): los 128/256
+  canales son combinaciones (interpoladas) de los 19 y el promedio de la
+  referencia REST del montaje denso no coincide con el de 64 canales → la
+  proyección REST tiene varianza casi nula y el error absoluto queda al
+  nivel de la amplitud (25 µV). No es un defecto de optimización: **es
+  degeneración del montaje mapeado para esa referencia**.
+
+* **Cuanto más denso, peor el ancla REST y mejor el resto de referencias.**
+  Los caminos unipolar/CAR (las referencias "cortas") mejoran con densidad
+  (unipolar→unipolar ~0.19 µV, CAR→CAR 0.4 µV en dense), porque hay más
+  canales redundantes que promedian ruido; justo el mecanismo que destruye
+  el REST.
+
+### Recomendación
+
+Para configuraciones densas, anclar REST con el lead field físico (o la
+referencia RESTRIDGE) del montaje en lugar de re-promediar canales
+interpolados; el término `surface_loss` puede quedarse en 0.1 (ancla el
+patrón sin dominar el ajuste por electrodo).
