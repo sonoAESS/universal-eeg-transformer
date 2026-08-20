@@ -153,3 +153,24 @@ Para configuraciones densas, anclar REST con el lead field físico (o la
 referencia RESTRIDGE) del montaje en lugar de re-promediar canales
 interpolados; el término `surface_loss` puede quedarse en 0.1 (ancla el
 patrón sin dominar el ajuste por electrodo).
+
+## Exploración: referencia REST en configuraciones densas
+
+**Diagnóstico (sin reentrenar):** con el código actual, `rest_matrix` invierte
+`G = W@L_denso` con `pinv(rcond=1e-12)`. Para las configuraciones densas `G`
+está esencialmente singular (cond ≈ 10^15) → se invierten modos de ruido →
+la matriz REST crece a valores 10^9–10^10 µV (analítico: `ve −48`; el
+`rmse_ana` degenerado de las densas). En `canonical` (64ch) `G` está bien
+condicionado y no ocurre (rango 63/64). El caché actual tiene `rest ≈ campo`
+(≈550 µV) → **desviación código/caché**: las cifras de las densas NO son
+reproducibles hasta regenerar la caché con el código vigente.
+
+**Alternativa (estilo RESTRIDGE):** truncar los valores singulares del
+operador de infinito — con `rcond ≥ 1e-4` se conservan ~20/128 componentes y
+la matriz REST queda estable (`RMS(M) ≈ 12`), conservando la parte medible
+(suave) de la referencia y eliminando los modos degenerados. Es la idea del
+"restricted average reference" trasladada al operador de infinito.
+
+**Próximo paso propuesto:** añadir `rest_rcond` (o `rest_rank`) al config,
+regenerar la caché multi-config y re-entrenar para verificar si las rutas REST
+de densas pasan de `r ≈ 0.07–0.38` a ~0.9.
