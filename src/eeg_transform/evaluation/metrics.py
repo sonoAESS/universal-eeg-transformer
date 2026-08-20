@@ -298,6 +298,7 @@ def evaluate_multiconfig_routes(
                     s, d, n_c,
                     unipolar_ref_index=mc.unipolar_ref_index,
                     lead_field=mc.leadfield,
+                    rest_rcond=mc.rest_rcond,
                 )
                 sta = _route_stats(targets[d], sources[s] @ ana)
                 rows.append({

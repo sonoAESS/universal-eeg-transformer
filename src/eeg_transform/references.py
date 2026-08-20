@@ -136,6 +136,7 @@ def build_reference_matrix(
     n_channels: int,
     unipolar_ref_index: Optional[int] = None,
     lead_field: Optional[np.ndarray] = None,
+    rest_rcond: Optional[float] = None,
 ) -> np.ndarray:
     """Construye la matriz de una referencia dada.
 
@@ -149,6 +150,11 @@ def build_reference_matrix(
         Índice del canal de referencia para la montaje ``unipolar``.
     lead_field:
         Lead field (necesario para ``rest``).
+    rest_rcond:
+        Corte relativo de valores singulares para la referencia REST
+        (estilo RESTRIDGE): trunca las componentes mal condicionadas del
+        operador al infinito. ``None`` mantiene el comportamiento de
+        ``rest_matrix`` (``rcond=1e-12``).
     """
     if kind not in REFERENCE_BUILDERS:
         raise ValueError(f"Referencia desconocida '{kind}'. Válidas: {REFERENCE_KINDS}")
@@ -161,7 +167,7 @@ def build_reference_matrix(
     if kind == "rest":
         if lead_field is None:
             raise ValueError("'rest' requiere lead_field.")
-        return rest_matrix(lead_field, n_channels)
+        return rest_matrix(lead_field, n_channels, rcond=rest_rcond or 1e-12)
 
     return REFERENCE_BUILDERS[kind](n_channels)
 
@@ -211,6 +217,7 @@ def inter_reference_matrix(
     unipolar_ref_index: Optional[int] = None,
     lead_field: Optional[np.ndarray] = None,
     rcond: float = 1e-10,
+    rest_rcond: Optional[float] = None,
 ) -> np.ndarray:
     """Mapa lineal analítico entre dos referencias (para validación).
 
@@ -223,10 +230,12 @@ def inter_reference_matrix(
     aprende exactamente las mismas transformaciones físicas.
     """
     t_src = build_reference_matrix(
-        kind_src, n_channels, unipolar_ref_index=unipolar_ref_index, lead_field=lead_field
+        kind_src, n_channels, unipolar_ref_index=unipolar_ref_index,
+        lead_field=lead_field, rest_rcond=rest_rcond,
     )
     t_dst = build_reference_matrix(
-        kind_dst, n_channels, unipolar_ref_index=unipolar_ref_index, lead_field=lead_field
+        kind_dst, n_channels, unipolar_ref_index=unipolar_ref_index,
+        lead_field=lead_field, rest_rcond=rest_rcond,
     )
     return t_dst @ np.linalg.pinv(t_src, rcond=rcond)
 
@@ -234,7 +243,8 @@ def inter_reference_matrix(
 def reference_matrix_from_kind(kind: str, n_channels: int, **kwargs) -> np.ndarray:
     """Alias con notación explícita del canal unipolar."""
     if kind == "rest":
-        return rest_matrix(kwargs.get("lead_field"), n_channels)
+        return rest_matrix(kwargs.get("lead_field"), n_channels,
+                           rcond=kwargs.get("rest_rcond") or 1e-12)
     if kind == "unipolar":
         return unipolar_matrix(n_channels, kwargs.get("unipolar_ref_index"))
     return REFERENCE_BUILDERS[kind](n_channels)

@@ -20,6 +20,7 @@ leadfield:
   sigmas: [0.33, 1.0, 0.0042, 0.33]
   brain_radius: 0.078
   src_grid_mm: 10.0
+  rest_rcond: 0.0001
 
 dataset:
   cache_dir: data/processed

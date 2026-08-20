@@ -60,6 +60,7 @@ class LeadFieldConfig:
     brain_radius: float = 0.078
     src_grid_mm: float = 10.0
     drop_bad_sources: bool = True
+    rest_rcond: float | None = None
 
 
 @dataclass
@@ -376,6 +377,8 @@ class EEGTransformConfig:
             raise ValueError("brain_radius debe ser menor que head_radius.")
         if self.leadfield.src_grid_mm <= 0:
             raise ValueError("src_grid_mm debe ser > 0.")
+        if self.leadfield.rest_rcond is not None and not (0.0 < self.leadfield.rest_rcond < 1.0):
+            raise ValueError("leadfield.rest_rcond debe estar en (0, 1) o ser None.")
 
 
 def load_config(path: str | Path) -> EEGTransformConfig:

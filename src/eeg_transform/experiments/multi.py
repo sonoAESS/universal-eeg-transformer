@@ -155,6 +155,7 @@ class MontageConfig:
     unipolar_ref_index: int
     refs: dict[str, dict[str, np.ndarray]]
     surface: np.ndarray | None = None
+    rest_rcond: float | None = None
 
 
 @dataclass
@@ -299,6 +300,7 @@ def _build_config_refs(
             k, n_c,
             unipolar_ref_index=spec["unipolar_ref_index_ops"],
             lead_field=spec["leadfield"],
+            rest_rcond=spec["rest_rcond"],
         ).astype(np.float32)
         for k in KINDS
     }
@@ -349,11 +351,13 @@ def build_multiconfig(
         else:
             raise ValueError(f"Configuración desconocida: '{label}'")
     canon_pos = np.asarray(ds.ch_positions, dtype=np.float64)
+    rest_rcond = cfg.leadfield.rest_rcond
     for spec in specs:
         if spec["label"] == "canonical":
             continue
         # operador unipolar del propio montaje: índice dentro del montaje
         spec["unipolar_ref_index_ops"] = spec["unipolar_ref_index"]
+        spec["rest_rcond"] = rest_rcond
         if spec["label"] in SUBSET_MONTAGES:
             spec["interp"] = None
             spec["out_map"] = _subset_out_map(canon_pos, spec["positions"])
@@ -368,15 +372,24 @@ def build_multiconfig(
         label = spec["label"]
         cache_file = cache_dir / f"{label}.npz"
         if cache_file.exists() and not force:
-            configs[label] = _load_config_cache(cache_file, spec, ds, budget)
-            if configs[label].surface is None:
+            cached = _load_config_cache(cache_file, spec, ds, budget)
+            if cached.rest_rcond != spec.get("rest_rcond"):
+                log.info("Configuración '%s': rest_rcond cambiado "
+                         "(%s → %s), regenerando.", label, cached.rest_rcond,
+                         spec.get("rest_rcond"))
+                cached = None
+            else:
+                configs[label] = cached
+            if cached is not None and configs[label].surface is None:
                 configs[label].surface = _config_surface(
                     spec["positions"], cfg.mapping.grid_px
                 ).astype(np.float32)
                 log.info("Mapa de superficie de '%s' recalculado (caché previa).",
                          label)
-            log.info("Configuración '%s' cargada de caché (%s)", label, cache_file)
-            continue
+            if cached is not None:
+                log.info("Configuración '%s' cargada de caché (%s)", label,
+                         cache_file)
+                continue
         refs = _build_config_refs(ds, spec)
         mc = MontageConfig(
             label=label,
@@ -389,6 +402,7 @@ def build_multiconfig(
             unipolar_ref_index=spec["unipolar_ref_index"],
             refs=refs,
             surface=_config_surface(spec["positions"], cfg.mapping.grid_px),
+            rest_rcond=spec.get("rest_rcond"),
         )
         _save_config_cache(mc, ds, cache_file)
         configs[label] = mc
@@ -422,6 +436,8 @@ def _save_config_cache(mc: MontageConfig, ds: MultiReferenceDataset, path: Path)
         "unipolar_ref_index": np.int16(mc.unipolar_ref_index),
         "surface": mc.surface.astype(np.float32) if mc.surface is not None
         else np.zeros(0, dtype=np.float32),
+        "rest_rcond": np.float32(mc.rest_rcond) if mc.rest_rcond is not None
+        else np.nan,
     }
     for split in ("train", "val", "test"):
         for k in KINDS:
@@ -440,6 +456,9 @@ def _load_config_cache(
             for split in ("train", "val", "test")
         }
         surface = d["surface"] if "surface" in d and d["surface"].size else None
+        rest_rcond = None
+        if "rest_rcond" in d and not np.isnan(d["rest_rcond"]):
+            rest_rcond = float(d["rest_rcond"])
         return MontageConfig(
             label=str(d["label"]),
             names=list(d["names"]),
@@ -451,6 +470,7 @@ def _load_config_cache(
             unipolar_ref_index=int(d["unipolar_ref_index"]),
             refs=refs,
             surface=surface,
+            rest_rcond=rest_rcond,
         )
 
 
