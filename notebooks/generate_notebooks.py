@@ -629,6 +629,15 @@ plot_multiconfig_surface(surface_df,
                          title=f"Campo de superficie (heatmap) — {cfg.model.variant}")
 plt.show()"""
 
+CELL_MULTICONFIG_FIELD_AGREE = r"""# Acuerdo de campo entre configuraciones (v2): los campos predichos de
+# 10-20 / canónico / densos (misma malla) deben coincidir (consistencia B4).
+from eeg_transform.evaluation import metrics as _metrics
+field_agree_df = _metrics.evaluate_multiconfig_field_agreement(model, data, split="test")
+if not field_agree_df.empty:
+    print(f"rmse_field pareado medio: {field_agree_df['rmse_field'].mean()*1e6:.3f} uV")
+    print(f"ve_field medio:            {field_agree_df['ve_field'].mean():.3f}")
+print(field_agree_df.round(9).to_string(index=False))"""
+
 
 def _code_cell(src: str) -> nbf.NotebookNode:
     return nbf.v4.new_code_cell(src.strip())
@@ -829,11 +838,40 @@ fijo, todos los campos viven en la **misma malla**: los heatmaps de 19/64/128/
 256 canales son comparables entre sí.
 """
 
+_MULTI_HEATMAP_V2_EXTRA = r"""
+### Multi_heatmap_v2: campo aprendible y consistencia física cruzada
+
+La variante **`multi_heatmap_v2`** corrige la redundancia del campo de la v1
+(donde `F̂ = x̂·S_sᵀ` con `S_s` fijo, un mero espejo suavizado) y añade
+regularización física:
+
+* **Interpolación aprendible (A2):** la matriz de campo `R_s` es entrenable,
+  inicializada en la spline `S_s` y regularizada hacia ella.
+* **Bucle electrodo↔campo (A1):** se exige `x̂ ≈ R_sᵀ·F̂ = (R_sᵀR_s)·x̂`, de
+  modo que el campo sea una representación fiel e invertible.
+* **Consistencia entre configuraciones (B4):** los campos de 10-20, canónico y
+  densos (misma malla) deben coincidir, alineándolos sin señal externa.
+* **Adaptadores por configuración (B5):** residual low-rank en el espacio
+  latente canónico para dar capacidad local sin tocar el core compartido.
+* **Suavizado temporal ligero (C7):** variación total entre muestras
+  consecutivas (requiere dataset ordenado en tiempo).
+* **Ponderación por incertidumbre (A3):** los pesos de los términos se
+  aprenden como `log σ²` (multi-task) cuando `learn_uncertainty` está activo.
+* **REST por configuración (C6):** `rest_rcond` se elige por configuración
+  vía validación cruzada de la VE analítica cuando `leadfield.rest_rcond_cv`
+  está activo.
+
+La evaluación añade `metrics_field_agreement_test.csv` (acuerdo de campo
+pareado entre configuraciones) como sustituto del topomapa real (D9).
+"""
+
 
 def _build_multiconfig_markdown(variant: str) -> str:
     text = _MULTICONFIG_MARKDOWN
-    if variant == "multi_heatmap":
-        text = text.rstrip() + "\n" + _MULTI_HEATMAP_EXTRA
+    if variant in ("multi_heatmap", "multi_heatmap_v2"):
+        extra = _MULTI_HEATMAP_V2_EXTRA if variant == "multi_heatmap_v2" \
+            else _MULTI_HEATMAP_EXTRA
+        text = text.rstrip() + "\n" + extra
     return text
 
 
@@ -888,7 +926,7 @@ def build_multiconfig_notebook(variant: str) -> nbf.NotebookNode:
         _code_cell(CELL_MULTICONFIG_BARS),
         _code_cell(CELL_MULTICONFIG_SCALPS),
     ]
-    if variant == "multi_heatmap":
+    if variant in ("multi_heatmap", "multi_heatmap_v2"):
         cells += [
             _md_cell("## 6. Campo de superficie (heatmap\n\n"
                      "La lectura como campo en la malla compartida es una salida "
@@ -897,6 +935,14 @@ def build_multiconfig_notebook(variant: str) -> nbf.NotebookNode:
                      "configuración."),
             _code_cell(CELL_MULTICONFIG_SURFACE_EVAL),
             _code_cell(CELL_MULTICONFIG_SURFACE_FIG),
+        ]
+    if variant == "multi_heatmap_v2":
+        cells += [
+            _md_cell("## 7. Acuerdo de campo entre configuraciones\n\n"
+                     "Métrica de la consistencia B4: los heatmaps predichos de "
+                     "todas las configuraciones viven en la misma malla y deben "
+                     "describir el mismo potencial de superficie."),
+            _code_cell(CELL_MULTICONFIG_FIELD_AGREE),
         ]
     cells += [
         _md_cell("## Conclusiones\n\n"
@@ -925,7 +971,7 @@ def main() -> None:
         with path.open("w", encoding="utf-8") as f:
             nbf.write(nb, f)
         print(f"Generado: {path}")
-    for variant in ("multi_montage", "multi_heatmap"):
+    for variant in ("multi_montage", "multi_heatmap", "multi_heatmap_v2"):
         nb = build_multiconfig_notebook(variant)
         path = OUT_DIR / f"{variant}.ipynb"
         with path.open("w", encoding="utf-8") as f:

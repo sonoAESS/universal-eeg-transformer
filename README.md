@@ -137,7 +137,11 @@ de latente `wide.yaml` (128) / `bottleneck.yaml` (32), las variantes de
 **unificación de montajes** `montage_leadfield.yaml` / `montage_heatmap.yaml`,
 y `multi_montage.yaml` (entrenamiento conjunto y balanceado sobre varias
 configuraciones de electrodos a la vez) y `multi_heatmap.yaml` (igual + campo
-de superficie/heatmap entrenado sobre la malla compartida).
+de superficie/heatmap entrenado sobre la malla compartida). También
+`multi_heatmap_v2.yaml` (como `multi_heatmap` + matriz de campo aprendible,
+consistencia electrodo↔campo y entre configuraciones, adaptadores por
+configuración, suavizado temporal e incertidumbre aprendida; ver
+`docs/guia_conceptual.md`).
 Resultados: `docs/results_comparison.md`, `docs/mapping_wip.md` y
 `docs/guia_conceptual.md`.
 

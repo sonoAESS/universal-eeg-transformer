@@ -61,6 +61,13 @@ class LeadFieldConfig:
     src_grid_mm: float = 10.0
     drop_bad_sources: bool = True
     rest_rcond: float | None = None
+    # C6: elegir rest_rcond por configuración vía validación cruzada de la VE
+    # analítica (unipolar reconstruida desde rest). Si es True, se ignora
+    # rest_rcond y se barre rest_rcond_candidates por configuración.
+    rest_rcond_cv: bool = False
+    rest_rcond_candidates: list[float] = field(
+        default_factory=lambda: [1e-2, 1e-3, 1e-4, 1e-5]
+    )
 
 
 @dataclass
@@ -166,7 +173,7 @@ def __post_init__(self):
 MODEL_VARIANTS: tuple[str, ...] = (
     "free", "group", "projected", "soft_group",
     "montage_leadfield", "montage_heatmap",
-    "multi_montage", "multi_heatmap",
+    "multi_montage", "multi_heatmap", "multi_heatmap_v2",
 )
 
 # Métodos de proyección entre montajes (ver mapping.build_projection).
@@ -194,20 +201,34 @@ class ModelConfig:
     # electrodo, se ajusta la actividad interpolada sobre la malla del cuero
     # cabelludo (patrón espacial suave, las "manchas" del topomapa).
     surface_loss_weight: float = 0.1
+    # --- Mejoras de ``multi_heatmap_v2`` ---
+    # Interpolación de campo aprendible (R_s entrenable, init = spline fija S_s).
+    learnable_interp: bool = False
+    # Peso de la consistencia electrodo<->campo: x̂ ≈ R_sᵀ·F̂ (A1).
+    field_consistency_weight: float = 0.0
+    # Peso de la consistencia entre campos de distintas configuraciones (B4).
+    xconfig_consistency_weight: float = 0.0
+    # Rango del adaptador low-rank por configuración (B5); 0 = desactivado.
+    adapter_rank: int = 0
+    # Peso de la regularización de variación total temporal (C7); 0 = off.
+    temporal_smoothness_weight: float = 0.0
+    # Ponderación por incertidumbre multi-task (A3): los pesos se aprenden.
+    learn_uncertainty: bool = False
 
     def __post_init__(self):
         # PyYAML puede dejar '1e-3' como cadena; se coerciona a numérico.
-        for name in ("latent_dim",):
+        for name in ("latent_dim", "adapter_rank"):
             try:
                 setattr(self, name, int(getattr(self, name)))
             except (TypeError, ValueError):
                 pass
-        for name in ("use_bias",):
+        for name in ("use_bias", "learnable_interp", "learn_uncertainty"):
             v = getattr(self, name)
             if isinstance(v, str):
                 setattr(self, name, v.strip().lower() in ("true", "1", "yes"))
         for name in ("kernel_regularizer_l2", "learning_rate", "comp_penalty_weight",
-                     "surface_loss_weight"):
+                     "surface_loss_weight", "field_consistency_weight",
+                     "xconfig_consistency_weight", "temporal_smoothness_weight"):
             try:
                 setattr(self, name, float(getattr(self, name)))
             except (TypeError, ValueError):
@@ -338,17 +359,20 @@ class EEGTransformConfig:
                 raise ValueError(
                     "multi_max_samples_per_split debe ser >= 1000 muestras."
                 )
-        if self.model.variant == "multi_heatmap":
+        if self.model.variant in ("multi_heatmap", "multi_heatmap_v2"):
             if self.mapping.method != "spline":
                 raise ValueError(
-                    "variant='multi_heatmap' requiere mapping.method == "
-                    "'spline' (el campo de superficie es la interpolación "
-                    "sobre la malla del cuero cabelludo)."
+                    "variant='%s' requiere mapping.method == 'spline' "
+                    "(el campo de superficie es la interpolación sobre la "
+                    "malla del cuero cabelludo)." % self.model.variant
                 )
             if not (0.0 <= self.model.surface_loss_weight <= 1.0):
                 raise ValueError(
-                    "surface_loss_weight debe estar en (0, 1] para multi_heatmap."
+                    "surface_loss_weight debe estar en (0, 1] para "
+                    f"{self.model.variant}."
                 )
+            if self.model.adapter_rank < 0:
+                raise ValueError("adapter_rank debe ser >= 0.")
         if self.model.variant in ("multi_montage", "multi_heatmap") and self.model.latent_dim not in (0, -1):
             raise ValueError(f"variant='{self.model.variant}' requiere latent_dim 0/auto.")
         if self.mapping.method not in MAPPING_METHODS:

@@ -1,0 +1,84 @@
+# Variante multi_heatmap_v2: como multi_heatmap (configuraciones balanceadas,
+# 19/64/128/256 canales) + mejoras de arquitectura:
+#   * learnable_interp: matriz de campo R_s entrenable (A2)
+#   * field_consistency_weight: bucle electrodo<->campo x̂≈R_sᵀ·F̂ (A1)
+#   * xconfig_consistency_weight: campos de distintas configs coinciden (B4)
+#   * adapter_rank: adaptador low-rank por config (B5; 0 = off)
+#   * temporal_smoothness_weight: variación total temporal (C7; 0 = off)
+#   * learn_uncertainty: pesos aprendidos por incertidumbre (A3)
+#   * rest_rcond_cv (leadfield): rest_rcond por config vía CV (C6)
+data:
+  subjects: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  runs: [1, 2]
+  bandpass: [1.0, 45.0]
+  notch: []
+  unipolar_ref_ch: "Cz"
+  original_reference: "left_mastoid"
+  artifact_z_thresh: 6.0
+  bad_channel_z_thresh: 4.0
+  n_jobs: 1
+
+leadfield:
+  head_radius: 0.09
+  rel_radii: [0.87, 0.90, 0.97, 1.00]
+  sigmas: [0.33, 1.0, 0.0042, 0.33]
+  brain_radius: 0.078
+  src_grid_mm: 10.0
+  rest_rcond: 0.0001
+  rest_rcond_cv: false
+  rest_rcond_candidates: [1e-2, 1e-3, 1e-4, 1e-5]
+
+dataset:
+  cache_dir: data/processed
+  split_mode: block
+  test_frac: 0.2
+  val_frac: 0.2
+  seed: 42
+  max_samples_per_subject: 60000
+  dtype: float32
+
+# Proyección spline al espacio canónico + presupuesto balanceado por split.
+mapping:
+  method: spline
+  montage: "10-20"
+  n_components: null
+  smoothness: 1.0e-5
+  adaptive_smoothness: true
+  grid_px: 48
+  configs: ["10-20", "canonical", "dense-128", "dense-256"]
+  multi_max_samples_per_split: 40000
+
+model:
+  variant: multi_heatmap_v2
+  latent_dim: 0
+  use_bias: false
+  kernel_regularizer_l2: 1.0e-6
+  optimizer: adam
+  learning_rate: 1.0e-3
+  comp_penalty_weight: 0.0
+  surface_loss_weight: 0.1
+  # --- mejoras v2 ---
+  learnable_interp: true
+  field_consistency_weight: 0.1
+  xconfig_consistency_weight: 0.1
+  adapter_rank: 0
+  temporal_smoothness_weight: 0.0
+  learn_uncertainty: false
+
+training:
+  epochs: 60
+  batch_size: 1024
+  early_stop_patience: 10
+  reduce_lr_patience: 5
+  reduce_lr_factor: 0.5
+  min_lr: 1.0e-5
+  shuffle_buffer: 20000
+  prefetch: 4
+  run_dir: runs/multi_heatmap_v2
+  log_file: runs/multi_heatmap_v2/train.log
+  save_best_only: true
+  seed: 42
+
+evaluation:
+  n_plot_samples: 400
+  plot_channel: "Cz"

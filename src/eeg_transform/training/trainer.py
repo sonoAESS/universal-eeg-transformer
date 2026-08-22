@@ -24,7 +24,7 @@ def is_montage_variant(cfg: EEGTransformConfig) -> bool:
 
 def is_multiconfig_variant(cfg: EEGTransformConfig) -> bool:
     """True para variantes que entrenan sobre varias configuraciones."""
-    return cfg.model.variant in ("multi_montage", "multi_heatmap")
+    return cfg.model.variant in ("multi_montage", "multi_heatmap", "multi_heatmap_v2")
 
 
 def load_multiconfig_data(cfg: EEGTransformConfig, ds: MultiReferenceDataset, force: bool = False):
@@ -48,7 +48,7 @@ def build_multiconfig_model(cfg, data):
     core.ensure_built()
     projections = {l: m.projection for l, m in data.configs.items()}
     out_maps = {l: m.out_map for l, m in data.configs.items()}
-    if cfg.model.variant == "multi_heatmap":
+    if cfg.model.variant in ("multi_heatmap", "multi_heatmap_v2"):
         surfaces = {
             l: np.asarray(m.surface, dtype=np.float32) for l, m in data.configs.items()
         }
@@ -56,9 +56,15 @@ def build_multiconfig_model(cfg, data):
             core=core, projections=projections, out_maps=out_maps,
             surfaces=surfaces,
             surface_loss_weight=cfg.model.surface_loss_weight,
+            learnable_interp=cfg.model.learnable_interp,
+            field_consistency_weight=cfg.model.field_consistency_weight,
+            xconfig_consistency_weight=cfg.model.xconfig_consistency_weight,
+            adapter_rank=cfg.model.adapter_rank,
+            temporal_smoothness_weight=cfg.model.temporal_smoothness_weight,
+            learn_uncertainty=cfg.model.learn_uncertainty,
         )
     return MultiMontageAutoencoder(core=core, projections=projections,
-                                   out_maps=out_maps)
+                                    out_maps=out_maps)
 
 
 def build_multiconfig_dataset(
@@ -348,8 +354,11 @@ def _train_multiconfig(ds, cfg, run_dir, tcfg, force):
         )
     )
 
+    # El suavizado temporal (C7) requiere muestras temporalmente adyacentes:
+    # se desactiva el shuffle del tren cuando temporal_smoothness_weight > 0.
+    train_shuffle = cfg.model.temporal_smoothness_weight <= 0.0
     train_ds = build_multiconfig_dataset(
-        data, "train", tcfg.batch_size, shuffle=True, seed=tcfg.seed,
+        data, "train", tcfg.batch_size, shuffle=train_shuffle, seed=tcfg.seed,
         buffer=tcfg.shuffle_buffer, prefetch=tcfg.prefetch, dtype=cfg.dataset.dtype,
     )
     val_ds = build_multiconfig_dataset(

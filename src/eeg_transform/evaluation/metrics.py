@@ -407,3 +407,53 @@ def summarize(metrics_df: pd.DataFrame, label: str) -> pd.DataFrame:
          "mae": off["mae"].mean(), "r": off["r"].mean()},
     ]
     return pd.DataFrame(rows)
+
+
+def evaluate_multiconfig_field_agreement(
+    model, data, split: str = "test",
+) -> pd.DataFrame:
+    """D9/surrogate: acuerdo de campo entre configuraciones sobre la malla.
+
+    Para cada ruta ``s->d`` interpola la predicción de cada configuración a la
+    malla compartida del cuero cabelludo (con su ``S_s`` fija) y mide el RMSE
+    por pares de configuraciones. Un valor bajo indica que 10-20, canónico y
+    densos describen el **mismo** potencial de superficie (consistencia B4).
+    """
+    preds = predict_multiconfig_routes(model, data, split)
+    labels = data.order
+    rows = []
+    for s in KINDS:
+        for d in KINDS:
+            fields = {}
+            # preds[label][s][d] es (n, C_s); campo = pred @ S.T
+            for label in labels:
+                arr = preds[label][s][d]
+                S = np.asarray(data.configs[label].surface, dtype=np.float64)
+                fields[label] = arr @ S.T
+            for i in range(len(labels)):
+                for j in range(i + 1, len(labels)):
+                    a, b = fields[labels[i]], fields[labels[j]]
+                    st = _route_stats(a, b)
+                    rows.append({
+                        "origen": s, "destino": d,
+                        "config_a": labels[i], "config_b": labels[j],
+                        "rmse_field": st["rmse"],
+                        "r_field": st["r"],
+                        "ve_field": st["ve"],
+                    })
+    return pd.DataFrame(rows)
+
+
+def external_topomap_loader(path: str):  # pragma: no cover - D9 placeholder
+    """D9 (futuro): cargar topomapas reales (p. ej. de localización de fuentes
+    o BIDS) para validar el campo predicho contra una medición independiente.
+
+    ``eegbci`` no incluye topomapas reales, por lo que la validación de
+    ``multi_heatmap_v2`` usa el acuerdo entre configuraciones
+    (:func:`evaluate_multiconfig_field_agreement`) como sustituto. Esta función
+    es un punto de extensión cuando exista una fuente externa de campos reales.
+    """
+    raise NotImplementedError(
+        "external_topomap_loader es un placeholder (D9): implementar la "
+        f"carga de topomapas reales desde '{path}' cuando esté disponible."
+    )

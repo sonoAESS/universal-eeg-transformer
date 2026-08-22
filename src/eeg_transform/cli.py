@@ -93,7 +93,7 @@ def cmd_eval(cfg) -> None:
         plots.plot_multiconfig_bars(metrics_df, run_dir)
         plots.plot_multiconfig_scalps(model, data, run_dir)
 
-        if cfg.model.variant == "multi_heatmap":
+        if cfg.model.variant in ("multi_heatmap", "multi_heatmap_v2"):
             surface_df = metrics.evaluate_multiconfig_surface_routes(
                 model, data, split="test")
             surf_summ = metrics.summarize_multiconfig_surface(surface_df)
@@ -107,6 +107,18 @@ def cmd_eval(cfg) -> None:
                 "ve_field_cross": "{:.3f}".format}))
             surface_df.to_csv(run_dir / "metrics_surface_test.csv", index=False)
             plots.plot_multiconfig_surface(surface_df, run_dir)
+
+        if cfg.model.variant == "multi_heatmap_v2":
+            field_agree_df = metrics.evaluate_multiconfig_field_agreement(
+                model, data, split="test")
+            if not field_agree_df.empty:
+                fa_rmse = field_agree_df["rmse_field"].mean() * 1e6
+                fa_ve = field_agree_df["ve_field"].mean()
+                print("\n======== ACUERDO DE CAMPO ENTRE CONFIGS (TEST) ========")
+                print(f"rmse_field pareado medio: {fa_rmse:.3f} uV  |  "
+                      f"ve_field medio: {fa_ve:.3f}")
+            field_agree_df.to_csv(run_dir / "metrics_field_agreement_test.csv",
+                                  index=False)
         return
 
     montage = build_montage_inputs(cfg, ds) if is_montage_variant(cfg) else None

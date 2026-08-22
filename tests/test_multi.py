@@ -364,3 +364,181 @@ def test_multi_heatmap_config_validation():
     cfg = EEGTransformConfig.from_dict(bad_latent)
     with pytest.raises(ValueError):
         cfg.validate()
+
+
+def test_multi_heatmap_v2_config_validation():
+    import pytest
+
+    # v2 válida con method == spline y pesos por defecto
+    ok = dict(model={"variant": "multi_heatmap_v2", "latent_dim": 0,
+                     "learnable_interp": True,
+                     "field_consistency_weight": 0.1,
+                     "xconfig_consistency_weight": 0.1,
+                     "adapter_rank": 2},
+              mapping={"configs": ["10-20", "canonical", "dense-8"],
+                       "method": "spline"})
+    cfg = EEGTransformConfig.from_dict(ok)
+    cfg.validate()  # no debe lanzar
+
+    # adapter_rank negativo -> inválido
+    bad_adapter = dict(model={"variant": "multi_heatmap_v2", "latent_dim": 0,
+                              "adapter_rank": -1},
+                       mapping={"configs": ["10-20", "canonical", "dense-8"],
+                                "method": "spline"})
+    cfg = EEGTransformConfig.from_dict(bad_adapter)
+    with pytest.raises(ValueError):
+        cfg.validate()
+
+    # exige method == spline
+    bad_method = dict(model={"variant": "multi_heatmap_v2", "latent_dim": 0},
+                      mapping={"configs": ["10-20", "canonical", "dense-8"],
+                               "method": "leadfield"})
+    cfg = EEGTransformConfig.from_dict(bad_method)
+    with pytest.raises(ValueError):
+        cfg.validate()
+
+
+def test_multi_heatmap_v2_model_improvements():
+    """v2: campo aprendible, consistencias, adaptadores, incertidumbre."""
+    import tensorflow as tf
+
+    from eeg_transform.models.multi_heatmap import MultiHeatmapAutoencoder
+
+    cfg = _multi_config()
+    cfg.model.variant = "multi_heatmap_v2"
+    ds = _FakeDataset.make()
+    data = build_multiconfig(ds, cfg, force=True)
+    core = _core(data)
+    core.ensure_built()
+    model = MultiHeatmapAutoencoder(
+        core=core,
+        projections={l: m.projection for l, m in data.configs.items()},
+        out_maps={l: m.out_map for l, m in data.configs.items()},
+        surfaces={l: m.surface for l, m in data.configs.items()},
+        surface_loss_weight=0.1,
+        learnable_interp=True,
+        field_consistency_weight=0.1,
+        xconfig_consistency_weight=0.1,
+        adapter_rank=2,
+        temporal_smoothness_weight=0.0,
+        learn_uncertainty=False,
+    )
+    model.compile(optimizer="adam")
+    # R_s aprendible inicializado en S_s (mismo shape que la superficie)
+    for l in data.order:
+        assert model.params.R_s[l].shape == model.surfaces[l].shape
+    # adaptadores por configuración
+    assert set(model.params.adapters.keys()) == set(data.order)
+    for l in data.order:
+        u, v = model.params.adapters[l]
+        assert u.shape == (data["canonical"].n_channels, 2)
+        assert v.shape == (2, data["canonical"].n_channels)
+    x = {l: {k: data[l].refs["train"][k] for k in data[l].refs["train"]}
+         for l in data.order}
+    out = model.train_step((x, x))
+    for key in ("loss", "loss_estandarizada", "surface_loss",
+                "field_consist_loss", "xconfig_loss", "temporal_loss",
+                "mse_real_V2"):
+        assert key in out
+        assert float(out[key]) == float(out[key])  # finito
+    out_val = model.test_step((x, x))
+    assert float(out_val["loss"]) == float(out_val["loss"])
+
+    # round-trip de configuración preserva los nuevos parámetros
+    restored = MultiHeatmapAutoencoder.from_config(model.get_config())
+    assert restored.learnable_interp is True
+    assert float(restored.field_consistency_weight) == 0.1
+    assert float(restored.xconfig_consistency_weight) == 0.1
+    assert restored.adapter_rank == 2
+    assert list(restored.params.adapters.keys()) == list(data.order)
+
+
+def test_multi_heatmap_v2_learnable_interp_changes_with_training():
+    """El campo aprendible R_s se aleja de la spline fija tras entrenar."""
+    import tensorflow as tf
+
+    from eeg_transform.models.multi_heatmap import MultiHeatmapAutoencoder
+
+    cfg = _multi_config()
+    cfg.model.variant = "multi_heatmap_v2"
+    ds = _FakeDataset.make()
+    data = build_multiconfig(ds, cfg, force=True)
+    core = _core(data)
+    core.ensure_built()
+    model = MultiHeatmapAutoencoder(
+        core=core,
+        projections={l: m.projection for l, m in data.configs.items()},
+        out_maps={l: m.out_map for l, m in data.configs.items()},
+        surfaces={l: m.surface for l, m in data.configs.items()},
+        learnable_interp=True,
+    )
+    model.compile(optimizer="adam")
+    before = {l: model.params.R_s[l].numpy().copy() for l in data.order}
+    x = {l: {k: data[l].refs["train"][k] for k in data[l].refs["train"]}
+         for l in data.order}
+    for _ in range(3):
+        model.train_step((x, x))
+    for l in data.order:
+        delta = np.linalg.norm(model.params.R_s[l].numpy() - before[l])
+        assert delta > 1e-6  # R_s evolucionó respecto a la inicialización
+
+
+def test_multi_heatmap_v2_uncertainty_trainable():
+    import tensorflow as tf
+
+    from eeg_transform.models.multi_heatmap import MultiHeatmapAutoencoder
+
+    cfg = _multi_config()
+    cfg.model.variant = "multi_heatmap_v2"
+    ds = _FakeDataset.make()
+    data = build_multiconfig(ds, cfg, force=True)
+    core = _core(data)
+    core.ensure_built()
+    model = MultiHeatmapAutoencoder(
+        core=core,
+        projections={l: m.projection for l, m in data.configs.items()},
+        out_maps={l: m.out_map for l, m in data.configs.items()},
+        surfaces={l: m.surface for l, m in data.configs.items()},
+        learn_uncertainty=True,
+    )
+    model.compile(optimizer="adam")
+    assert set(model.log_vars.keys()) == {"elec", "surf", "field", "xconfig", "temp"}
+    assert any(v.trainable for v in model.log_vars.values())
+    x = {l: {k: data[l].refs["train"][k] for k in data[l].refs["train"]}
+         for l in data.order}
+    out = model.train_step((x, x))
+    assert float(out["loss"]) == float(out["loss"])
+
+
+def test_multi_heatmap_v2_field_agreement_metric():
+    """evaluate_multiconfig_field_agreement devuelve acuerdo pareado."""
+    from eeg_transform.evaluation import metrics as mtr
+    from eeg_transform.models.multi_heatmap import MultiHeatmapAutoencoder
+
+    cfg = _multi_config()
+    cfg.model.variant = "multi_heatmap_v2"
+    ds = _FakeDataset.make()
+    data = build_multiconfig(ds, cfg, force=True)
+    core = _core(data)
+    core.ensure_built()
+    model = MultiHeatmapAutoencoder(
+        core=core,
+        projections={l: m.projection for l, m in data.configs.items()},
+        out_maps={l: m.out_map for l, m in data.configs.items()},
+        surfaces={l: m.surface for l, m in data.configs.items()},
+    )
+    fa = mtr.evaluate_multiconfig_field_agreement(model, data, split="test")
+    n_pairs = len(data.order) * (len(data.order) - 1) // 2
+    assert len(fa) == n_pairs * 16  # rutas s->d
+    assert sorted(fa.columns) == sorted(
+        ["origen", "destino", "config_a", "config_b",
+         "rmse_field", "r_field", "ve_field"])
+
+
+def test_external_topomap_loader_raises():
+    from eeg_transform.evaluation import metrics as mtr
+
+    import pytest
+
+    with pytest.raises(NotImplementedError):
+        mtr.external_topomap_loader("/tmp/does_not_exist")

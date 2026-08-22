@@ -48,7 +48,7 @@ from ..mapping import (
     select_subset,
     spherical_spline_matrix,
 )
-from ..references import build_reference_matrix
+from ..references import build_reference_matrix, inter_reference_matrix
 from .montage import MONTAGE_10_20, MONTAGE_10_10_39
 
 log = get_logger(__name__)
@@ -75,6 +75,37 @@ def parse_dense(label: str) -> int:
 
 def is_subset(label: str) -> bool:
     return label in SUBSET_MONTAGES
+
+
+def _choose_rest_rcond(
+    leadfield: np.ndarray,
+    n_c: int,
+    uni_train: np.ndarray,
+    rest_train: np.ndarray,
+    candidates: list[float],
+    unipolar_ref_index: int,
+) -> float:
+    """C6: elige ``rest_rcond`` que maximiza la VE analítica de reconstruir
+    unipolar desde rest en el propio montaje (barrido por configuración)."""
+    uni = np.asarray(uni_train, dtype=np.float64)[:5000]
+    rest = np.asarray(rest_train, dtype=np.float64)[:5000]
+    if uni.shape[0] < 4:
+        return float(candidates[0])
+    best_rcond, best_ve = float(candidates[0]), -1e9
+    for cand in candidates:
+        t_mat = inter_reference_matrix(
+            "unipolar", "rest", n_c,
+            unipolar_ref_index=unipolar_ref_index,
+            lead_field=leadfield, rest_rcond=cand,
+        )
+        pred = rest @ t_mat
+        t = uni - uni.mean(1, keepdims=True)
+        p = pred - pred.mean(1, keepdims=True)
+        err = t - p
+        ve = float(1.0 - np.sum(err ** 2) / (np.sum(t ** 2) + 1e-15))
+        if ve > best_ve:
+            best_ve, best_rcond = ve, float(cand)
+    return best_rcond
 
 
 def dense_cap_positions(
@@ -358,6 +389,22 @@ def build_multiconfig(
         # operador unipolar del propio montaje: índice dentro del montaje
         spec["unipolar_ref_index_ops"] = spec["unipolar_ref_index"]
         spec["rest_rcond"] = rest_rcond
+        # C6: rest_rcond por configuración vía validación cruzada de la VE.
+        if cfg.leadfield.rest_rcond_cv:
+            uni = ds.refs["unipolar"][spec["budget"]["train"]]
+            rst = ds.refs["rest"][spec["budget"]["train"]]
+            if spec["label"] in SUBSET_MONTAGES:
+                uni_c = uni[:, spec["src_idx"]]
+                rst_c = rst[:, spec["src_idx"]]
+            else:
+                uni_c = uni @ spec["interp"]
+                rst_c = rst @ spec["interp"]
+            spec["rest_rcond"] = _choose_rest_rcond(
+                spec["leadfield"], spec["n_channels"], uni_c, rst_c,
+                cfg.leadfield.rest_rcond_candidates, spec["unipolar_ref_index"],
+            )
+            log.info("Configuración '%s': rest_rcond CV = %s",
+                     spec["label"], spec["rest_rcond"])
         if spec["label"] in SUBSET_MONTAGES:
             spec["interp"] = None
             spec["out_map"] = _subset_out_map(canon_pos, spec["positions"])
