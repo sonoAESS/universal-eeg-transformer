@@ -18,11 +18,24 @@ from .logging_conf import get_logger
 
 log = get_logger(__name__)
 
-# Las cuatro referencias canónicas que el transformador debe unificar. Cada
-# una es un operador lineal bien definido que elimina la componente constante
-# instantánea, por lo que su valor NO depende de la referencia física en la
-# que se adquirió la señal original (ver ``data.original_reference``).
-REFERENCE_KINDS: tuple[str, ...] = ("unipolar", "bipolar", "car", "rest")
+# Las referencias que el transformador debe unificar (rama universal_refs).
+# Cada una es un operador lineal bien definido; todas anulan la componente
+# constante instantánea, por lo que su valor NO depende de la referencia
+# física en la que se adquirió la señal original (ver
+# ``data.original_reference``). ``unipolar`` es la referencia al canal
+# vértice (``data.unipolar_ref_ch``, por defecto Cz); ``linked_mastoids`` y
+# ``linked_ears`` restan el promedio del potencial interpolado en M1/M2 y
+# A1/A2; ``laplacian`` es el Laplaciano de superficie esférico (Perrin,
+# 1989), invariante a cualquier re-referenciación.
+REFERENCE_KINDS: tuple[str, ...] = (
+    "unipolar",
+    "linked_mastoids",
+    "linked_ears",
+    "bipolar",
+    "car",
+    "rest",
+    "laplacian",
+)
 
 # Referencias físicas admisibles para el dato original (adquisición).
 ORIGINAL_REFERENCES: tuple[str, ...] = ("left_mastoid", "cz", "average")

@@ -8,11 +8,18 @@ se construyen explícitamente dichas matrices :math:`M \\in \\mathbb{R}^{C
 algebraicamente exacto y reproducible.
 
 Referencias soportadas:
-    * ``unipolar``  : ``X - X[:, u]`` (referencia a un canal ``u``, por
-      defecto ``Cz``).
-    * ``bipolar``   : cadena diferencial cíclica ``X[i] - X[i+1]``.
-    * ``car``       : referencia promedio (common average reference).
-    * ``rest``      : referencia al infinito (Yao, 2001), ver :mod:`leadfield`.
+    * ``unipolar``        : ``X - X[:, u]`` (referencia a un canal ``u``,
+      por defecto el vértice ``Cz``).
+    * ``linked_mastoids`` : ``X - mean(X[M1], X[M2])``, con el potencial en
+      las mastoides interpolado esféricamente desde los electrodos reales.
+    * ``linked_ears``     : ídem con los lóbulos A1/A2.
+    * ``bipolar``         : cadena diferencial; si se dan posiciones reales,
+      la cadena es anular sobre electrodos vecinos (orden azimutal).
+    * ``car``             : referencia promedio (common average reference).
+    * ``rest``            : referencia al infinito (Yao, 2001), ver
+      :mod:`leadfield`.
+    * ``laplacian``       : Laplaciano de superficie esférico (Perrin, 1989),
+      estimador del CSD; invariante a cualquier re-referenciación.
 
 Referencia del dato original: la señal adquirida (p. ej. ``eegbci``, contra
 la mastoides izquierda) queda implícita en ``X``. Los cuatro operadores
@@ -31,6 +38,12 @@ import numpy as np
 
 from .config import REFERENCE_KINDS
 from .logging_conf import get_logger
+from .mapping import (
+    EAR_LOBE_POSITIONS,
+    MASTOID_POSITIONS,
+    landmark_weights_matrix,
+    spherical_laplacian_matrix,
+)
 
 log = get_logger(__name__)
 
@@ -67,6 +80,56 @@ def bipolar_chain_matrix(n_channels: int) -> np.ndarray:
     cols = np.arange(n_channels)
     m[rows, cols] -= 1.0
     return m
+
+
+def bipolar_nn_chain_matrix(positions: np.ndarray) -> np.ndarray:
+    """Cadena bipolar por vecinos físicos más cercanos (ciclo codicioso).
+
+    Empieza en el electrodo de mayor elevación y visita siempre el vecino
+    angular no visitado más cercano (distancia geodésica sobre el casco);
+    el ciclo se cierra con el último electrodo. Cada par es físicamente
+    adyacente salvo el cierre, análogo al cierre de la cadena doble plátano.
+    """
+    unit = positions / np.linalg.norm(positions, axis=1, keepdims=True)
+    n_c = len(unit)
+    cos = np.clip(unit @ unit.T, -1.0, 1.0)
+    dist = np.arccos(cos)
+    np.fill_diagonal(dist, np.inf)
+
+    order = [int(np.argmax(unit[:, 2]))]          # arranca en el vértice
+    pendientes = set(range(n_c)) - {order[0]}
+    while pendientes:
+        ultimo = order[-1]
+        siguiente = min(pendientes, key=lambda j: dist[ultimo, j])
+        order.append(siguiente)
+        pendientes.discard(siguiente)
+
+    m = np.zeros((n_c, n_c))
+    for j in range(n_c):
+        m[order[j], order[j]] += 1.0
+        m[order[j], order[(j + 1) % n_c]] -= 1.0
+    return m
+
+
+def linked_matrix(n_channels: int, weights: np.ndarray) -> np.ndarray:
+    """Referencia *linked* genérica: ``X_ref = X - (X @ w) 1ᵀ``.
+
+    ``w`` son pesos de interpolación hacia el hito anatómico (o promedio de
+    dos hitos, p. ej. M1/M2): ``(X @ w)`` es el potencial estimado en ese
+    hito, que se resta a todos los canales. Como ``Σw = 1``, la matriz anula
+    el modo común y conserva el rango ``C - 1``.
+    """
+    w = np.asarray(weights, dtype=np.float64)
+    if w.shape != (n_channels,):
+        raise ValueError(
+            f"weights debe tener forma ({n_channels},), recibió {w.shape}."
+        )
+    return np.eye(n_channels) - w[:, None] @ np.ones((1, n_channels))
+
+
+def laplacian_matrix(positions: np.ndarray) -> np.ndarray:
+    """Matriz del Laplaciano de superficie (Perrin) para posiciones reales."""
+    return spherical_laplacian_matrix(positions)
 
 
 def rest_matrix(
@@ -137,6 +200,7 @@ def build_reference_matrix(
     unipolar_ref_index: Optional[int] = None,
     lead_field: Optional[np.ndarray] = None,
     rest_rcond: Optional[float] = None,
+    positions: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Construye la matriz de una referencia dada.
 
@@ -155,8 +219,14 @@ def build_reference_matrix(
         (estilo RESTRIDGE): trunca las componentes mal condicionadas del
         operador al infinito. ``None`` mantiene el comportamiento de
         ``rest_matrix`` (``rcond=1e-12``).
+    positions:
+        Posiciones reales ``(C, 3)`` de los electrodos; necesarias para
+        ``linked_mastoids``, ``linked_ears``, ``laplacian`` y la cadena
+        bipolar anular sobre vecinos físicos.
     """
-    if kind not in REFERENCE_BUILDERS:
+    if kind not in REFERENCE_BUILDERS and kind not in (
+        "linked_mastoids", "linked_ears", "laplacian"
+    ):
         raise ValueError(f"Referencia desconocida '{kind}'. Válidas: {REFERENCE_KINDS}")
 
     if kind == "unipolar":
@@ -169,6 +239,21 @@ def build_reference_matrix(
             raise ValueError("'rest' requiere lead_field.")
         return rest_matrix(lead_field, n_channels, rcond=rest_rcond or 1e-12)
 
+    if kind in ("linked_mastoids", "linked_ears"):
+        if positions is None:
+            raise ValueError(f"'{kind}' requiere posiciones de electrodos.")
+        landmark = MASTOID_POSITIONS if kind == "linked_mastoids" else EAR_LOBE_POSITIONS
+        weights = landmark_weights_matrix(positions, landmark)
+        return linked_matrix(n_channels, weights)
+
+    if kind == "laplacian":
+        if positions is None:
+            raise ValueError("'laplacian' requiere posiciones de electrodos.")
+        return laplacian_matrix(positions)
+
+    if kind == "bipolar" and positions is not None:
+        return bipolar_nn_chain_matrix(positions)
+
     return REFERENCE_BUILDERS[kind](n_channels)
 
 
@@ -177,13 +262,16 @@ def compute_all_references(
     n_channels: int,
     unipolar_ref_index: Optional[int] = None,
     lead_field: Optional[np.ndarray] = None,
+    rest_rcond: Optional[float] = None,
+    positions: Optional[np.ndarray] = None,
 ) -> Dict[str, np.ndarray]:
-    """Calcula las cuatro referencias canónicas alineadas en el tiempo.
+    """Calcula todas las referencias alineadas en el tiempo.
 
     ``X_raw`` es la señal tal como fue adquirida; su referencia física de
     origen (p. ej. mastoides izquierda en ``eegbci``) no altera el resultado
     porque todos los operadores aplicados eliminan el offset constante por
-    instante (ver :func:`rest_matrix` y :func:`car_matrix`).
+    instante (ver :func:`rest_matrix` y :func:`car_matrix`; el Laplaciano es
+    directamente invariante a re-referenciación).
 
     Parameters
     ----------
@@ -195,6 +283,11 @@ def compute_all_references(
         Canal de referencia del montaje unipolar.
     lead_field:
         Lead field para REST.
+    rest_rcond:
+        Corte SVD relativo del operador REST (opcional).
+    positions:
+        Posiciones reales de los electrodos (necesarias para linked/laplacian
+        y bipolar anular).
 
     Returns
     -------
@@ -204,7 +297,8 @@ def compute_all_references(
     refs: Dict[str, np.ndarray] = {}
     for kind in REFERENCE_KINDS:
         m = build_reference_matrix(
-            kind, n_channels, unipolar_ref_index=unipolar_ref_index, lead_field=lead_field
+            kind, n_channels, unipolar_ref_index=unipolar_ref_index,
+            lead_field=lead_field, rest_rcond=rest_rcond, positions=positions,
         )
         refs[kind] = X_raw @ m
     return refs
@@ -218,6 +312,7 @@ def inter_reference_matrix(
     lead_field: Optional[np.ndarray] = None,
     rcond: float = 1e-10,
     rest_rcond: Optional[float] = None,
+    positions: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Mapa lineal analítico entre dos referencias (para validación).
 
@@ -231,20 +326,21 @@ def inter_reference_matrix(
     """
     t_src = build_reference_matrix(
         kind_src, n_channels, unipolar_ref_index=unipolar_ref_index,
-        lead_field=lead_field, rest_rcond=rest_rcond,
+        lead_field=lead_field, rest_rcond=rest_rcond, positions=positions,
     )
     t_dst = build_reference_matrix(
         kind_dst, n_channels, unipolar_ref_index=unipolar_ref_index,
-        lead_field=lead_field, rest_rcond=rest_rcond,
+        lead_field=lead_field, rest_rcond=rest_rcond, positions=positions,
     )
     return t_dst @ np.linalg.pinv(t_src, rcond=rcond)
 
 
 def reference_matrix_from_kind(kind: str, n_channels: int, **kwargs) -> np.ndarray:
     """Alias con notación explícita del canal unipolar."""
-    if kind == "rest":
-        return rest_matrix(kwargs.get("lead_field"), n_channels,
-                           rcond=kwargs.get("rest_rcond") or 1e-12)
-    if kind == "unipolar":
-        return unipolar_matrix(n_channels, kwargs.get("unipolar_ref_index"))
-    return REFERENCE_BUILDERS[kind](n_channels)
+    return build_reference_matrix(
+        kind, n_channels,
+        unipolar_ref_index=kwargs.get("unipolar_ref_index"),
+        lead_field=kwargs.get("lead_field"),
+        rest_rcond=kwargs.get("rest_rcond"),
+        positions=kwargs.get("positions"),
+    )

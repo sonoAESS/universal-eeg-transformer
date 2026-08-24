@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from eeg_transform.config import EEGTransformConfig, ModelConfig
+from eeg_transform.config import EEGTransformConfig, ModelConfig, REFERENCE_KINDS
 from eeg_transform.experiments.multi import build_multiconfig, dense_cap_positions
 from eeg_transform.mapping import select_subset
 from eeg_transform.models.multi_montage import MultiMontageAutoencoder
@@ -63,7 +63,7 @@ class _FakeDataset:
         pos = _sphere_positions(n_c, seed=seed)
         lf = rng.normal(size=(n_c, n_src)).astype(np.float32)
         base = rng.normal(size=(n_samples, n_c)).astype(np.float32)
-        refs = {k: base.copy() for k in ("unipolar", "bipolar", "car", "rest")}
+        refs = {k: base.copy() for k in REFERENCE_KINDS}
         idx = np.arange(n_samples)
         return cls(
             n_channels=n_c, ch_names=names, ch_positions=pos,
@@ -143,7 +143,7 @@ def test_build_multiconfig_shapes_refs_and_balance():
         n_c = data[label].n_channels
         for split in ("train", "val", "test"):
             n_b = data.n_budget(split)
-            for kind in ("unipolar", "bipolar", "car", "rest"):
+            for kind in REFERENCE_KINDS:
                 assert data[label].refs[split][kind].shape == (n_b, n_c)
     # el subconjunto es una selección exacta de columnas del canónico
     keep, _, src_idx = select_subset(ds.ch_names, ds.ch_positions,
@@ -185,13 +185,12 @@ def test_multimontage_forward_intra_config_shapes():
         projections={l: m.projection for l, m in data.configs.items()},
         out_maps={l: m.out_map for l, m in data.configs.items()},
     )
-    x = {l: {k: data[l].refs["test"][k][:4] for k in ("unipolar", "bipolar",
-                                                       "car", "rest")}
+    x = {l: {k: data[l].refs["test"][k][:4] for k in REFERENCE_KINDS}
          for l in data.order}
     preds = model(x)  # call completo (todos los configs)
     for l in data.order:
         n_c = data[l].n_channels
-        assert set(preds[l]) == set(("unipolar", "bipolar", "car", "rest"))
+        assert set(preds[l]) == set(REFERENCE_KINDS)
         for s in data[l].refs["test"]:
             for d, t in preds[l][s].items():
                 assert t.shape == (4, n_c)   # intra-configuración
@@ -216,14 +215,8 @@ def test_multimontage_transfer_matrices_shape():
         out_maps={l: m.out_map for l, m in data.configs.items()},
     )
     mats = model.transfer_matrices("10-20")
-    assert set(mats) == {("unipolar", "unipolar"), ("unipolar", "bipolar"),
-                         ("unipolar", "car"), ("unipolar", "rest"),
-                         ("bipolar", "unipolar"), ("bipolar", "bipolar"),
-                         ("bipolar", "car"), ("bipolar", "rest"),
-                         ("car", "unipolar"), ("car", "bipolar"),
-                         ("car", "car"), ("car", "rest"),
-                         ("rest", "unipolar"), ("rest", "bipolar"),
-                         ("rest", "car"), ("rest", "rest")}
+    assert set(mats) == {(s, d) for s in REFERENCE_KINDS
+                         for d in REFERENCE_KINDS}
     assert all(m.shape == (19, 19) for m in mats.values())
 
 
@@ -240,7 +233,7 @@ def test_evaluate_multiconfig_routes_has_analytic_baseline():
         out_maps={l: m.out_map for l, m in data.configs.items()},
     )
     rules = metrics.evaluate_multiconfig_routes(model, data, split="test")
-    assert len(rules) == len(data.order) * 16
+    assert len(rules) == len(data.order) * len(REFERENCE_KINDS) ** 2
     assert sorted(rules.columns) == sorted(
         ["config", "origen", "destino", "mse", "rmse", "mae", "r", "ve",
          "rmse_ana", "r_ana", "ve_ana"])
@@ -331,7 +324,7 @@ def test_evaluate_multiconfig_surface_routes():
         out_maps={l: m.out_map for l, m in data.configs.items()},
     )
     surface = mtr.evaluate_multiconfig_surface_routes(model, data, split="test")
-    assert len(surface) == len(data.order) * 16
+    assert len(surface) == len(data.order) * len(REFERENCE_KINDS) ** 2
     assert sorted(surface.columns) == sorted(
         ["config", "origen", "destino", "rmse_field", "r_field", "ve_field"])
     summ = mtr.summarize_multiconfig_surface(surface)
@@ -529,7 +522,7 @@ def test_multi_heatmap_v2_field_agreement_metric():
     )
     fa = mtr.evaluate_multiconfig_field_agreement(model, data, split="test")
     n_pairs = len(data.order) * (len(data.order) - 1) // 2
-    assert len(fa) == n_pairs * 16  # rutas s->d
+    assert len(fa) == n_pairs * len(REFERENCE_KINDS) ** 2  # rutas s->d
     assert sorted(fa.columns) == sorted(
         ["origen", "destino", "config_a", "config_b",
          "rmse_field", "r_field", "ve_field"])

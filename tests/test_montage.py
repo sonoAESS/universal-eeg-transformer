@@ -118,12 +118,12 @@ def test_build_tf_dataset_montage_sources_targets():
         pass
 
     ds = _DS()
-    ds.refs = {k: rng.normal(size=(n, c)).astype(np.float32)
-               for k in ("unipolar", "bipolar", "car", "rest")}
+    from eeg_transform.config import REFERENCE_KINDS as _RKS
+
+    ds.refs = {k: rng.normal(size=(n, c)).astype(np.float32) for k in _RKS}
     ds.split_idx = {"train": np.arange(n), "val": np.arange(n),
                     "test": np.arange(n)}
-    sources = {k: rng.normal(size=(n, cs)).astype(np.float32)
-               for k in ("unipolar", "bipolar", "car", "rest")}
+    sources = {k: rng.normal(size=(n, cs)).astype(np.float32) for k in _RKS}
     dset = build_tf_dataset(ds, "train", batch_size=4,
                             sources={"train": sources})
     batch = next(iter(dset))

@@ -55,7 +55,8 @@ log = get_logger(__name__)
 
 KINDS = list(REFERENCE_KINDS)
 
-MULTI_CACHE_SUBDIR = "multiconfig"
+# v2 del esquema de caché: incluye las 7 referencias (universal_refs).
+MULTI_CACHE_SUBDIR = "multiconfig_v2"
 DENSE_PREFIX = "dense-"
 
 # Subconjuntos reales del montaje canónico (posiciones coincidentes exactas).
@@ -332,6 +333,7 @@ def _build_config_refs(
             unipolar_ref_index=spec["unipolar_ref_index_ops"],
             lead_field=spec["leadfield"],
             rest_rcond=spec["rest_rcond"],
+            positions=spec["positions"],
         ).astype(np.float32)
         for k in KINDS
     }

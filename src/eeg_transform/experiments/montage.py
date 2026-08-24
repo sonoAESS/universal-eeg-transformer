@@ -169,12 +169,14 @@ def _source_operators(
 ):
     """Matrices de referencia del montaje fuente (operadores ``Cs``-canales)."""
     g_src = ds.leadfield.matrix[src_idx, :]
+    src_positions = np.asarray(ds.ch_positions)[src_idx]
     out: dict[str, np.ndarray] = {}
     local_names = [ds.ch_names[i] for i in src_idx]
     uni_local = local_names.index(uni_ref_ch)
     for k in REFERENCE_KINDS:
         out[k] = build_reference_matrix(
-            k, n_src, unipolar_ref_index=uni_local, lead_field=g_src
+            k, n_src, unipolar_ref_index=uni_local, lead_field=g_src,
+            positions=src_positions,
         )
     return out
 

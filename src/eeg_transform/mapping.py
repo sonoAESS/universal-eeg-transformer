@@ -60,6 +60,26 @@ def _legendre_kernel(c: np.ndarray, order: int = 8, m: int = 4) -> np.ndarray:
     return out
 
 
+def _legendre_kernel_laplacian(c: np.ndarray, order: int = 30, m: int = 4) -> np.ndarray:
+    """Núcleo espectral del CSD spline ``-(Δ_S)`` sobre el mismo spline (Perrin).
+
+    El Laplaciano de superficie multiplica cada grado ``n`` por ``n(n+1)``;
+    con la convención neurofisiológica ``CSD = -Δ_S V`` el coeficiente pasa
+    de ``(2n+1)/(n(n+1))^m`` a ``(2n+1)/(n(n+1))^(m-1)``, el clásico
+    ``(2n+1)/(n(n+1))^3`` para ``m=4``.
+    """
+    c = np.asarray(c, dtype=np.float64)
+    out = np.zeros_like(c)
+    p_prev = np.ones_like(c)
+    p_curr = c.copy()
+    for n in range(1, order + 1):
+        coef = (2.0 * n + 1.0) / (n * (n + 1.0)) ** (m - 1)
+        out += coef * p_curr
+        p_next = ((2.0 * n + 1.0) * c * p_curr - n * p_prev) / (n + 1.0)
+        p_prev, p_curr = p_curr, p_next
+    return out
+
+
 def _normalize(positions: np.ndarray) -> np.ndarray:
     """Normaliza posiciones 3D al radio unitario (esfera)."""
     r = np.linalg.norm(positions, axis=1, keepdims=True)
@@ -106,6 +126,79 @@ def spherical_spline_matrix(
     right = a_inv[:, :n_s]                # (C_s+1, C_s)
     m = np.hstack([k_ds, np.ones((dst.shape[0], 1))]) @ right  # (C_dst, C_s)
     return np.ascontiguousarray(m.T, dtype=np.float32)
+
+
+def spherical_laplacian_matrix(
+    positions: np.ndarray,
+    order: int = 30,
+    smoothness: float = 1e-7,
+    radius: float | None = None,
+) -> np.ndarray:
+    """Matriz del Laplaciano de superficie esférico ``(C_s, C_s)`` (Perrin 1989).
+
+    Ajusta el spline esférico de potencial a los electrodos (mismo sistema y
+    *gauge* de suma nula que :func:`spherical_spline_matrix`) y evalúa su
+    derivada angular segunda con el núcleo espectral ``(2n+1)/(n(n+1))^3``,
+    escalada por ``1/R²`` para producir unidades físicas (V/m²) con ``R`` el
+    radio del casco (por defecto, la mediana de las normas de las
+    posiciones). Aplicada como ``X @ L``, cada fila produce el CSD del canal.
+
+    Propiedades físicas: anula el modo constante común por filas (es
+    invariante a cualquier re-referenciación, pues añadir la misma señal a
+    todos los canales no altera el resultado).
+    """
+    src = _normalize(positions)
+    c_ss = src @ src.T
+    k_ss = _legendre_kernel(c_ss.ravel(), order=order).reshape(c_ss.shape)
+    d_ss = _legendre_kernel_laplacian(c_ss.ravel(), order=order).reshape(c_ss.shape)
+
+    n_s = src.shape[0]
+    top = np.hstack([k_ss + smoothness * np.eye(n_s), np.ones((n_s, 1))])
+    bot = np.hstack([np.ones((1, n_s)), np.zeros((1, 1))])
+    # [a; a0] = inv(A) @ [V; 0]: solo importan las primeras n_s columnas de
+    # la inversa y, dentro de ellas, las filas de coeficientes (el término
+    # de gauge a0 no contribuye al Laplaciano: Δ(constante) = 0).
+    coef = np.linalg.inv(np.vstack([top, bot]))[:n_s, :n_s]
+    lap = d_ss @ coef                                         # (C_s, C_s)
+    if radius is None:
+        radius = float(np.median(np.linalg.norm(positions, axis=1)))
+    lap = lap / max(radius, 1e-6) ** 2
+    return np.ascontiguousarray(lap.T, dtype=np.float64)
+
+
+def landmark_weights_matrix(
+    positions: np.ndarray,
+    landmark_positions: np.ndarray,
+    smoothness: float = 1e-5,
+) -> np.ndarray:
+    """Pesos de interpolación de los electrodos hacia hitos anatómicos.
+
+    Devuelve ``w`` de forma ``(C_s,)`` tal que ``X @ w`` aproxima el potencial
+    promedio en los puntos de referencia dados (p. ej. mastoides M1/M2 o
+    lóbulos A1/A2): cada columna del interpolador esférico se promedia. Los
+    pesos suman ~1 (preservan el modo constante) y permiten construir
+    referencias *linked* como ``M = I - 1 wᵀ``.
+    """
+    interp = spherical_spline_matrix(positions, landmark_positions,
+                                     smoothness=smoothness)   # (C_s, L)
+    w = interp.mean(axis=1).astype(np.float64)
+    # Normalización exacta: Σw = 1 garantiza que la referencia linked anule
+    # el modo constante por construcción (invariancia a la referencia de
+    # adquisición), incluso con extrapolación bajo el ecuador.
+    return w / w.sum()
+
+
+# Hitos anatómicos estándar en la esfera unitaria (z vertical, y anterior).
+# Mastoides M1/M2: azimut ±90°, ligeramente por debajo del ecuador (~-6°).
+# Lóbulos A1/A2: mismos azimuts, más inferiores (~-15°).
+MASTOID_POSITIONS = np.array([
+    [1.0, 0.0, np.tan(np.deg2rad(-6.0))],
+    [-1.0, 0.0, np.tan(np.deg2rad(-6.0))],
+]) / np.sqrt(1.0 + np.tan(np.deg2rad(-6.0)) ** 2)
+EAR_LOBE_POSITIONS = np.array([
+    [1.0, 0.0, np.tan(np.deg2rad(-15.0))],
+    [-1.0, 0.0, np.tan(np.deg2rad(-15.0))],
+]) / np.sqrt(1.0 + np.tan(np.deg2rad(-15.0)) ** 2)
 
 
 def density_smoothness(
