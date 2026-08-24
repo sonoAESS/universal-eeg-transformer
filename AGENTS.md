@@ -75,6 +75,25 @@ Se generan desde `notebooks/generate_notebooks.py` (nbformat): editar ahí la
 lógica/regenerar, nunca el `.ipynb` directamente. Cada notebook reutiliza el
 checkpoint de `runs/` salvo `FORCE = True`.
 
+## Rama actual: `explore/multi-heatmap` (variante universal_refs)
+
+Exploración centrada en un modelo que convierte entre **7 referencias** —
+`unipolar` (vértice Cz), `linked_mastoids`, `linked_ears`, `bipolar`, `car`,
+`rest`, `laplacian` — siempre **intra-configuración** (misma densidad de
+entrada y salida), sobre **cascos reales exclusivamente** (nada de posiciones
+simuladas): eegbci 64ch canónico + subconjuntos exactos de canales reales +
+bases externas BIDS (OpenNeuro) ingeridas con su casco nativo. El modelo es un
+híbrido: núcleo lineal instantáneo + cabeza temporal de residuo (ventana
+centrada offline) en el espacio canónico.
+
+* Estructura propia de la rama: `multi_heatmap/` con los notebooks de Colab
+  (`01_exploracion_datos.ipynb`, `02_modelo_entrenamiento.ipynb`) — estos se
+  editan a mano, NO se regeneran desde `generate_notebooks.py`.
+* Fases acordadas (ver plan): F0 operadores físicos + tests → F1 datos
+  multi-base reales + dataset ventaneado → F2 modelo híbrido + restricciones
+  físicas → F3 config/evaluación espectral → F4 notebooks + smoke.
+* Prefijo de commit de la rama: `feat(universal_refs): ...`.
+
 ## Trabajo con ramas y commits
 
 * Mensajes de commit en español, imperativos, con el prefijo de la variante
