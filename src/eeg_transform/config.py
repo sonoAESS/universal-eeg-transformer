@@ -187,6 +187,8 @@ MODEL_VARIANTS: tuple[str, ...] = (
     "free", "group", "projected", "soft_group",
     "montage_leadfield", "montage_heatmap",
     "multi_montage", "multi_heatmap", "multi_heatmap_v2",
+    # universal_refs: 7 referencias + cabeza temporal de residuo
+    "universal_refs",
 )
 
 # Métodos de proyección entre montajes (ver mapping.build_projection).
@@ -227,10 +229,29 @@ class ModelConfig:
     temporal_smoothness_weight: float = 0.0
     # Ponderación por incertidumbre multi-task (A3): los pesos se aprenden.
     learn_uncertainty: bool = False
+    # --- Cabeza temporal de residuo (universal_refs) ---
+    # Ventana centrada offline (muestras); 0 = modelo puramente instantáneo.
+    # La cabeza consume la señal canónica de la ventana y predice el residuo
+    # respecto al mapa lineal; con capa final a cero el arranque es idéntico
+    # al modelo instantáneo (ablation trivial).
+    temporal_window: int = 0
+    temporal_stride: int = 1
+    # Dimensión oculta y nº de bloques convolucionales depthwise+pointwise.
+    temporal_channels: int = 64
+    temporal_layers: int = 2
+    temporal_kernel: int = 7
+    # Peso del residuo temporal sobre la salida lineal (regulariza cuánto
+    # puede desviarse la corrección dinámica del mapa físico).
+    temporal_residual_weight: float = 1.0
+    # Penalización de modos espaciales en salidas diferenciales: media nula
+    # en bipolar/linked/laplacian y proyección nula sobre l<=1 en laplacian.
+    mode_penalty_weight: float = 0.0
 
     def __post_init__(self):
         # PyYAML puede dejar '1e-3' como cadena; se coerciona a numérico.
-        for name in ("latent_dim", "adapter_rank"):
+        for name in ("latent_dim", "adapter_rank", "temporal_window",
+                     "temporal_stride", "temporal_channels",
+                     "temporal_layers", "temporal_kernel"):
             try:
                 setattr(self, name, int(getattr(self, name)))
             except (TypeError, ValueError):
@@ -241,7 +262,8 @@ class ModelConfig:
                 setattr(self, name, v.strip().lower() in ("true", "1", "yes"))
         for name in ("kernel_regularizer_l2", "learning_rate", "comp_penalty_weight",
                      "surface_loss_weight", "field_consistency_weight",
-                     "xconfig_consistency_weight", "temporal_smoothness_weight"):
+                     "xconfig_consistency_weight", "temporal_smoothness_weight",
+                     "temporal_residual_weight", "mode_penalty_weight"):
             try:
                 setattr(self, name, float(getattr(self, name)))
             except (TypeError, ValueError):

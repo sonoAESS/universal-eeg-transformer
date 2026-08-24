@@ -24,7 +24,9 @@ def is_montage_variant(cfg: EEGTransformConfig) -> bool:
 
 def is_multiconfig_variant(cfg: EEGTransformConfig) -> bool:
     """True para variantes que entrenan sobre varias configuraciones."""
-    return cfg.model.variant in ("multi_montage", "multi_heatmap", "multi_heatmap_v2")
+    return cfg.model.variant in (
+        "multi_montage", "multi_heatmap", "multi_heatmap_v2", "universal_refs",
+    )
 
 
 def load_multiconfig_data(cfg: EEGTransformConfig, ds: MultiReferenceDataset, force: bool = False):
@@ -63,6 +65,35 @@ def build_multiconfig_model(cfg, data):
             temporal_smoothness_weight=cfg.model.temporal_smoothness_weight,
             learn_uncertainty=cfg.model.learn_uncertainty,
         )
+    if cfg.model.variant == "universal_refs":
+        from ..models.multi_heatmap import MultiHeatmapTemporal, mode_projector_matrix
+
+        surfaces = {
+            l: np.asarray(m.surface, dtype=np.float32) for l, m in data.configs.items()
+        }
+        projectors = {
+            l: mode_projector_matrix(m.positions)
+            for l, m in data.configs.items()
+        }
+        return MultiHeatmapTemporal(
+            core=core, projections=projections, out_maps=out_maps,
+            surfaces=surfaces,
+            mode_projectors=projectors,
+            surface_loss_weight=cfg.model.surface_loss_weight,
+            learnable_interp=cfg.model.learnable_interp,
+            field_consistency_weight=cfg.model.field_consistency_weight,
+            xconfig_consistency_weight=cfg.model.xconfig_consistency_weight,
+            adapter_rank=cfg.model.adapter_rank,
+            temporal_smoothness_weight=cfg.model.temporal_smoothness_weight,
+            learn_uncertainty=cfg.model.learn_uncertainty,
+            temporal_window=cfg.model.temporal_window,
+            temporal_stride=cfg.model.temporal_stride,
+            temporal_channels=cfg.model.temporal_channels,
+            temporal_layers=cfg.model.temporal_layers,
+            temporal_kernel=cfg.model.temporal_kernel,
+            temporal_residual_weight=cfg.model.temporal_residual_weight,
+            mode_penalty_weight=cfg.model.mode_penalty_weight,
+        )
     return MultiMontageAutoencoder(core=core, projections=projections,
                                     out_maps=out_maps)
 
@@ -93,6 +124,71 @@ def build_multiconfig_dataset(
     n = data.n_budget(split)
     if shuffle:
         dset = dset.shuffle(min(buffer, max(1, n)), seed=seed,
+                            reshuffle_each_iteration=True)
+    dset = dset.repeat()
+    return dset.batch(batch_size, drop_remainder=False).prefetch(prefetch)
+
+
+def count_windows(n_samples: int, window: int, stride: int) -> int:
+    """Número de ventanas completas ``1 + floor((n - window) / stride)``."""
+    if n_samples < window:
+        return 0
+    return 1 + (n_samples - window) // max(1, stride)
+
+
+def build_multiconfig_windowed(
+    data,
+    split: str,
+    batch_size: int,
+    window: int,
+    stride: int = 1,
+    shuffle: bool = False,
+    seed: int = 42,
+    buffer: int = 4_000,
+    prefetch: int = 4,
+    dtype: str = "float32",
+) -> tf.data.Dataset:
+    """Dataset multi-configuración en VENTANAS temporales contiguas.
+
+    Cada elemento es ``(X, Y)`` con ``X[c][k]`` de forma ``(T_w, C_s)``: una
+    ventana centrada offline de ``T_w`` muestras consecutivas. El orden
+    temporal DENTRO de la ventana se preserva (es el insumo de la cabeza
+    dinámica); el shuffle actúa solo sobre ventanas, nunca dentro.
+
+    El alineamiento por índice entre configuraciones (zip) exige el mismo
+    nº de ventanas en todas las hojas: se recorta al mínimo común. Con los
+    presupuestos balanceados esto coincide con ``count_windows(budget)``
+    salvo que alguna base externa aporte menos datos.
+    """
+    stride = max(1, int(stride))
+
+    def _leaf(arr):
+        ds_elem = tf.data.Dataset.from_tensor_slices(tf.cast(arr, dtype))
+        wins = ds_elem.window(window, shift=stride, drop_remainder=True)
+        return wins.flat_map(lambda w: w.batch(window))
+
+    # nº común de ventanas (mínimo sobre configs y referencias)
+    n_min = min(
+        count_windows(m.refs[split][k].shape[0], window, stride)
+        for c, m in data.configs.items()
+        for k in m.refs[split]
+    )
+    if n_min <= 0:
+        raise ValueError(
+            f"Split '{split}' demasiado corto para ventana {window} "
+            f"(mínimo disponible: "
+            f"{min(m.refs[split][next(iter(m.refs[split]))].shape[0] for m in data.configs.values())})."
+        )
+
+    parts = {}
+    for c, m in data.configs.items():
+        parts[c] = {
+            k: _leaf(m.refs[split][k].astype(dtype)).take(n_min)
+            for k in m.refs[split]
+        }
+    dset = tf.data.Dataset.zip((parts, parts))
+    if shuffle:
+        dset = dset.shuffle(min(buffer, n_min), seed=seed,
                             reshuffle_each_iteration=True)
     dset = dset.repeat()
     return dset.batch(batch_size, drop_remainder=False).prefetch(prefetch)
@@ -357,14 +453,28 @@ def _train_multiconfig(ds, cfg, run_dir, tcfg, force):
     # El suavizado temporal (C7) requiere muestras temporalmente adyacentes:
     # se desactiva el shuffle del tren cuando temporal_smoothness_weight > 0.
     train_shuffle = cfg.model.temporal_smoothness_weight <= 0.0
-    train_ds = build_multiconfig_dataset(
-        data, "train", tcfg.batch_size, shuffle=train_shuffle, seed=tcfg.seed,
-        buffer=tcfg.shuffle_buffer, prefetch=tcfg.prefetch, dtype=cfg.dataset.dtype,
-    )
-    val_ds = build_multiconfig_dataset(
-        data, "val", tcfg.batch_size, shuffle=False, prefetch=tcfg.prefetch,
-        dtype=cfg.dataset.dtype,
-    )
+    if getattr(cfg.model, "temporal_window", 0) > 0:
+        # universal_refs: ventanas centradas offline para la cabeza dinámica
+        train_ds = build_multiconfig_windowed(
+            data, "train", tcfg.batch_size,
+            window=cfg.model.temporal_window, stride=cfg.model.temporal_stride,
+            shuffle=train_shuffle, seed=tcfg.seed, buffer=min(tcfg.shuffle_buffer, 4000),
+            prefetch=tcfg.prefetch, dtype=cfg.dataset.dtype,
+        )
+        val_ds = build_multiconfig_windowed(
+            data, "val", tcfg.batch_size,
+            window=cfg.model.temporal_window, stride=cfg.model.temporal_stride,
+            shuffle=False, prefetch=tcfg.prefetch, dtype=cfg.dataset.dtype,
+        )
+    else:
+        train_ds = build_multiconfig_dataset(
+            data, "train", tcfg.batch_size, shuffle=train_shuffle, seed=tcfg.seed,
+            buffer=tcfg.shuffle_buffer, prefetch=tcfg.prefetch, dtype=cfg.dataset.dtype,
+        )
+        val_ds = build_multiconfig_dataset(
+            data, "val", tcfg.batch_size, shuffle=False, prefetch=tcfg.prefetch,
+            dtype=cfg.dataset.dtype,
+        )
 
     steps_per_epoch = max(1, data.n_budget("train") // tcfg.batch_size)
     validation_steps = max(1, data.n_budget("val") // tcfg.batch_size)

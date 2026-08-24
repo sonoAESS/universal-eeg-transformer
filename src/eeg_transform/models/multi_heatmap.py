@@ -388,3 +388,269 @@ class MultiHeatmapAutoencoder(MultiMontageAutoencoder):
             learn_uncertainty=config.get("learn_uncertainty", False),
             field_kind=config.get("field_kind", DEFAULT_FIELD_KIND),
         )
+
+
+class TemporalResidualHead(tf.keras.layers.Layer):
+    """Cabeza convolucional ligera que predice el residuo dinámico.
+
+    Opera en el espacio canónico sobre la ventana centrada ``(T_w, C)``:
+    bloques depthwise+pointwise con conexión residual capturan patrones
+    temporales locales; las cabezas por destino son convoluciones ``1×1``
+    inicializadas a **cero**, de modo que con pesos iniciales la salida es
+    exactamente la del modelo instantáneo lineal (ablation trivial).
+    """
+
+    def __init__(self, kinds, channels=64, num_layers=2, kernel_size=7,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.kinds = list(kinds)
+        self.channels = int(channels)
+        self.num_layers = int(num_layers)
+        self.kernel_size = int(kernel_size)
+        self.blocks = []
+        for i in range(self.num_layers):
+            self.blocks.append([
+                tf.keras.layers.DepthwiseConv1D(
+                    self.kernel_size, padding="same", name=f"tdw{i}"),
+                tf.keras.layers.Conv1D(self.channels, 1, name=f"tpw{i}"),
+                tf.keras.layers.Activation("gelu"),
+            ])
+        # proyección de entrada a `channels` (pointwise)
+        self.in_proj = tf.keras.layers.Conv1D(self.channels, 1, name="tin")
+        # las cabezas por destino se crean en build() (necesitan units=C)
+        self.heads = {}
+
+    def build(self, input_shape):
+        c = int(input_shape[-1])
+        for k in self.kinds:
+            self.heads[k] = tf.keras.layers.Conv1D(
+                c, 1, name=f"thead_{k}",
+                kernel_initializer="zeros", bias_initializer="zeros",
+            )
+        super().build(input_shape)
+
+    def call(self, u):                      # u: (..., T, C)
+        h = self.in_proj(u)
+        for dw, pw, act in self.blocks:
+            h = h + act(pw(dw(h)))
+        return {k: head(h) for k, head in self.heads.items()}
+
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update({"kinds": self.kinds, "channels": self.channels,
+                    "num_layers": self.num_layers,
+                    "kernel_size": self.kernel_size})
+        return cfg
+
+
+def mode_projector_matrix(positions: np.ndarray) -> np.ndarray:
+    """Proyector que anula los modos espaciales l<=1 del casco.
+
+    Construye ``P = I - G(GᵀG)⁻¹Gᵀ`` con ``G = [1, x, y, z]`` sobre las
+    posiciones unitarias de los electrodos. Aplicado por columnas
+    (``pred @ P``) deja fuera todo componente común y gradiente lineal: la
+    condición física que cumplen bipolar/linked (l=0) y el Laplaciano
+    (l<=1). Sirve como penalización de realismo para las salidas del modelo.
+    """
+    pos = np.asarray(positions, dtype=np.float64)
+    pos = pos / np.maximum(np.linalg.norm(pos, axis=1, keepdims=True), 1e-12)
+    g = np.hstack([np.ones((len(pos), 1)), pos])
+    p = np.eye(len(pos)) - g @ np.linalg.solve(g.T @ g, g.T)
+    return p.astype(np.float32)
+
+
+class MultiHeatmapTemporal(MultiHeatmapAutoencoder):
+    """universal_refs: núcleo lineal instantáneo + cabeza temporal de residuo.
+
+    Sobre :class:`MultiHeatmapAutoencoder` añade:
+
+    * **Cabeza dinámica** (:class:`TemporalResidualHead`) en el espacio
+      canónico: consume la ventana centrada ``(T_w, C)`` de la señal
+      proyectada ``u = x·P_s`` y corrige cada destino antes de ``Q_s``.
+      Con capa final a cero el arranque es idéntico al modelo lineal.
+    * **Penalización de modos espaciales**: las salidas diferenciales
+      (bipolar, linked, laplacian) se penalizan si contienen componentes
+      comunes o gradientes lineales (proyector ``l<=1`` por configuración).
+
+    Las entradas deben ser ventanas ``(batch, T_w, C_s)`` cuando
+    ``temporal_window > 0``; con tensores 2-D el residuo se desactiva y el
+    forward coincide con ``multi_heatmap_v2``.
+    """
+
+    def __init__(
+        self,
+        core,
+        projections,
+        out_maps,
+        surfaces,
+        mode_projectors: Dict[str, np.ndarray] | None = None,
+        temporal_window: int = 0,
+        temporal_stride: int = 1,
+        temporal_channels: int = 64,
+        temporal_layers: int = 2,
+        temporal_kernel: int = 7,
+        temporal_residual_weight: float = 1.0,
+        mode_penalty_weight: float = 0.0,
+        **kwargs,
+    ):
+        super().__init__(core=core, projections=projections,
+                         out_maps=out_maps, surfaces=surfaces, **kwargs)
+        self.temporal_window = int(temporal_window)
+        self.temporal_stride = max(1, int(temporal_stride))
+        self.temporal_residual_weight = float(temporal_residual_weight)
+        self.mode_penalty_weight = float(mode_penalty_weight)
+
+        self.head = TemporalResidualHead(
+            kinds=self.kinds, channels=temporal_channels,
+            num_layers=temporal_layers, kernel_size=temporal_kernel,
+            name="temporal_head",
+        )
+        if self.n_canonical:
+            self.head.build(tf.TensorShape([None, None, self.n_canonical]))
+
+        self.mode_projectors = {
+            label: tf.constant(np.asarray(mat, dtype=np.float32))
+            for label, mat in (mode_projectors or {}).items()
+        }
+
+        self.residual_tracker = tf.keras.metrics.Mean(name="residual_norm")
+        self.mode_tracker = tf.keras.metrics.Mean(name="mode_loss")
+
+    # ------------------------------------------------------------------
+    def _predict_cfg(self, x, cfg, source):
+        u = tf.matmul(tf.cast(x, tf.float32), self.projections[cfg])
+        z = self.core.encode(u, source)
+        preds = {d: self.core.decode(z, d) for d in self.kinds}
+        if self.adapter_rank > 0:
+            u_mat, v_mat = self.params.adapters[cfg]
+            preds = {d: tf.matmul(preds[d], u_mat) @ v_mat for d in self.kinds}
+        base = {d: tf.matmul(preds[d], self.out_maps[cfg]) for d in self.kinds}
+        if self.temporal_window > 0 and u.shape.rank == 3:
+            delta = self.head(u)                       # {d: (n,T,C)}
+            q = self.out_maps[cfg]
+            base = {
+                d: base[d] + self.temporal_residual_weight
+                * tf.matmul(delta[d], q)
+                for d in self.kinds
+            }
+            self.residual_tracker.update_state(
+                tf.add_n([tf.reduce_mean(tf.square(v)) for v in delta.values()])
+                / len(self.kinds)
+            )
+        return base
+
+    def _mode_penalty_from(self, preds_all):
+        terms = []
+        for c in self.configs:
+            if c not in self.mode_projectors:
+                continue
+            p_mat = self.mode_projectors[c]
+            for s in self.kinds:
+                for d in ("bipolar", "linked_mastoids", "linked_ears",
+                          "laplacian"):
+                    x = preds_all[c][s][d]
+                    proj = tf.matmul(x, p_mat)
+                    terms.append(self._zscore_loss(proj,
+                                                   tf.zeros_like(proj)))
+        return tf.add_n(terms) / len(terms) if terms else tf.zeros(())
+
+    def train_step(self, data):
+        sources, targets = data
+        with tf.GradientTape() as tape:
+            base, surf, fc, xc, temp, preds_all = self._forward_losses(sources, targets)
+            mode = self._mode_penalty_from(preds_all)
+            loss = self._combine_losses(base, surf, fc, xc, temp)
+            loss = loss + self.mode_penalty_weight * mode
+            if self.losses:
+                loss = loss + tf.add_n(self.losses)
+
+        grads = tape.gradient(loss, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
+
+        self.loss_tracker.update_state(loss)
+        self.mse_tracker.update_state(self._real_mse(sources, targets))
+        self.surface_tracker.update_state(surf)
+        self.field_consist_tracker.update_state(fc)
+        self.xconfig_tracker.update_state(xc)
+        self.temporal_tracker.update_state(temp)
+        self.mode_tracker.update_state(mode)
+        return {
+            "loss": self.loss_tracker.result(),
+            "loss_estandarizada": self.loss_tracker.result(),
+            "surface_loss": self.surface_tracker.result(),
+            "field_consist_loss": self.field_consist_tracker.result(),
+            "xconfig_loss": self.xconfig_tracker.result(),
+            "temporal_loss": self.temporal_tracker.result(),
+            "mode_loss": self.mode_tracker.result(),
+            "residual_norm": self.residual_tracker.result(),
+            "mse_real_V2": self.mse_tracker.result(),
+        }
+
+    def test_step(self, data):
+        sources, targets = data
+        base, surf, fc, xc, temp, preds_all = self._forward_losses(sources, targets)
+        mode = self._mode_penalty_from(preds_all)
+        loss = self._combine_losses(base, surf, fc, xc, temp)
+        loss = loss + self.mode_penalty_weight * mode
+        self.loss_tracker.update_state(loss)
+        self.mse_tracker.update_state(self._real_mse(sources, targets))
+        self.surface_tracker.update_state(surf)
+        self.field_consist_tracker.update_state(fc)
+        self.xconfig_tracker.update_state(xc)
+        self.mode_tracker.update_state(mode)
+        return {
+            "loss": self.loss_tracker.result(),
+            "loss_estandarizada": self.loss_tracker.result(),
+            "mode_loss": self.mode_tracker.result(),
+            "residual_norm": self.residual_tracker.result(),
+            "mse_real_V2": self.mse_tracker.result(),
+        }
+
+    # ------------------------------------------------------------------
+    def get_config(self):
+        base = super().get_config()
+        return {
+            **base,
+            "mode_projectors": {
+                l: m.numpy().tolist() for l, m in self.mode_projectors.items()
+            },
+            "temporal_window": self.temporal_window,
+            "temporal_stride": self.temporal_stride,
+            "temporal_residual_weight": self.temporal_residual_weight,
+            "mode_penalty_weight": self.mode_penalty_weight,
+            "head_cfg": self.head.get_config(),
+        }
+
+    @classmethod
+    def from_config(cls, config, custom_objects=None):
+        from .universal_transformer import UniversalEEGTransformer
+
+        core = UniversalEEGTransformer.from_config(config["core_cfg"])
+        model = cls(
+            core=core,
+            projections={l: np.asarray(m, np.float32)
+                         for l, m in config["projections"].items()},
+            out_maps={l: np.asarray(m, np.float32)
+                      for l, m in config["out_maps"].items()},
+            surfaces={l: np.asarray(m, np.float32)
+                      for l, m in config["surfaces"].items()},
+            mode_projectors={l: np.asarray(m, np.float32)
+                             for l, m in config.get("mode_projectors", {}).items()},
+            surface_loss_weight=config.get("surface_loss_weight", 0.1),
+            learnable_interp=config.get("learnable_interp", False),
+            field_consistency_weight=config.get("field_consistency_weight", 0.0),
+            xconfig_consistency_weight=config.get("xconfig_consistency_weight", 0.0),
+            adapter_rank=config.get("adapter_rank", 0),
+            temporal_smoothness_weight=config.get("temporal_smoothness_weight", 0.0),
+            learn_uncertainty=config.get("learn_uncertainty", False),
+            field_kind=config.get("field_kind", DEFAULT_FIELD_KIND),
+            temporal_window=config.get("temporal_window", 0),
+            temporal_stride=config.get("temporal_stride", 1),
+            temporal_residual_weight=config.get("temporal_residual_weight", 1.0),
+            mode_penalty_weight=config.get("mode_penalty_weight", 0.0),
+        )
+        head_cfg = config.get("head_cfg") or {}
+        model.head.channels = int(head_cfg.get("channels", 64))
+        model.head.num_layers = int(head_cfg.get("num_layers", 2))
+        model.head.kernel_size = int(head_cfg.get("kernel_size", 7))
+        return model
