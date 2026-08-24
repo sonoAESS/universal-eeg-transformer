@@ -27,6 +27,11 @@ dev = [
     "ipython>=9.0",
     "jupyter>=1.0",
 ]
+# Ingesta de bases BIDS externas (OpenNeuro) con casco nativo real
+external = [
+    "mne-bids>=0.16",
+    "requests>=2.32",
+]
 
 [project.scripts]
 eeg-transform = "eeg_transform.cli:main"

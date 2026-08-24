@@ -40,6 +40,7 @@ import numpy as np
 
 from ..config import EEGTransformConfig, REFERENCE_KINDS
 from ..data.dataset import MultiReferenceDataset
+from ..data.external import load_external_dataset
 from ..leadfield import compute_lead_field
 from ..logging_conf import get_logger
 from ..mapping import (
@@ -263,6 +264,48 @@ def _resolve_config_subset(
     }
 
 
+def _resolve_config_external(
+    ds: MultiReferenceDataset, name: str, cfg: EEGTransformConfig, budget: int
+):
+    """Configuración con casco nativo REAL desde una base externa BIDS.
+
+    ``name`` es la etiqueta usada en :func:`build_external_dataset`; las
+    referencias ya vienen calculadas con el lead field del propio casco, así
+    que aquí solo se construyen la proyección al canónico (``P_s``), el mapa
+    de lectura (``Q_s``) y el presupuesto balanceado por split.
+    """
+    ext = load_external_dataset(cfg.dataset.cache_dir, name)
+    ext_pos = np.asarray(ext.ch_positions, dtype=np.float64)
+    canon_pos = np.asarray(ds.ch_positions, dtype=np.float64)
+    mapping = cfg.mapping
+    projection = build_projection(
+        mapping.method, ext_pos, canon_pos,
+        g_src=ext.leadfield.matrix.astype(np.float32),
+        g_dst=ds.leadfield.matrix,
+        n_components=mapping.n_components,
+        smoothness=mapping.smoothness,
+        adaptive_smoothness=mapping.adaptive_smoothness,
+    )
+    out_map = spherical_spline_matrix(canon_pos, ext_pos,
+                                      smoothness=mapping.smoothness)
+    uni_ch = ds.meta.get("unipolar_ref_ch", "Cz")
+    uni_local = ext.ch_names.index(uni_ch) if uni_ch in ext.ch_names else 0
+    return {
+        "label": f"external:{name}",
+        "names": list(ext.ch_names),
+        "positions": ext_pos,
+        "n_channels": len(ext.ch_names),
+        "projection": projection,
+        "out_map": out_map,
+        "leadfield": ext.leadfield.matrix.astype(np.float32),
+        "unipolar_ref_index": uni_local,
+        # presupuesto por conteo (los sujetos no coinciden entre bases)
+        "budget": {s: _budget_indices(np.asarray(ext.split_idx[s]), budget)
+                   for s in ("train", "val", "test")},
+        "external_refs": ext.refs,
+    }
+
+
 def _resolve_config_dense(
     ds: MultiReferenceDataset, label: str, cfg: EEGTransformConfig, budget: int
 ):
@@ -312,7 +355,24 @@ def _build_config_refs(
     ds: MultiReferenceDataset,
     spec: dict[str, Any],
 ):
-    """Referencias del montaje (metodología fiel) para todos los splits."""
+    """Referencias del montaje para todos los splits.
+
+    * ``canonical``  : referencias nativas del dataset ancla.
+    * ``external:*`` : referencias REALES ya calculadas con el lead field
+      del casco externo (:func:`build_external_dataset`).
+    * resto          : derivadas fielmente del ancla REST canónica.
+    """
+    if spec.get("external_refs") is not None:
+        # {kind: (N, C_s)} a nivel de dataset; el presupuesto indexa por split
+        ext_refs = spec["external_refs"]
+        return {
+            split: {
+                k: np.asarray(ext_refs[k], dtype=np.float32)[
+                    np.asarray(idx, dtype=int)]
+                for k in KINDS
+            }
+            for split, idx in spec["budget"].items()
+        }
     label = spec["label"]
     if label == "canonical":
         return {
@@ -379,6 +439,9 @@ def build_multiconfig(
             specs.append(_resolve_config_canonical(ds, budget))
         elif is_subset(label):
             specs.append(_resolve_config_subset(ds, label, cfg, budget))
+        elif label.startswith("external:"):
+            specs.append(_resolve_config_external(
+                ds, label[len("external:"):], cfg, budget))
         elif is_dense(label):
             specs.append(_resolve_config_dense(ds, label, cfg, budget))
         else:
@@ -386,7 +449,8 @@ def build_multiconfig(
     canon_pos = np.asarray(ds.ch_positions, dtype=np.float64)
     rest_rcond = cfg.leadfield.rest_rcond
     for spec in specs:
-        if spec["label"] == "canonical":
+        if spec["label"] == "canonical" or spec.get("external_refs") is not None:
+            # canónico: operadores nativos; externo: refs reales propias
             continue
         # operador unipolar del propio montaje: índice dentro del montaje
         spec["unipolar_ref_index_ops"] = spec["unipolar_ref_index"]
