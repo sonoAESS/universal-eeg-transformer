@@ -458,3 +458,57 @@ def external_topomap_loader(path: str):  # pragma: no cover - D9 placeholder
         "external_topomap_loader es un placeholder (D9): implementar la "
         f"carga de topomapas reales desde '{path}' cuando esté disponible."
     )
+
+
+# Bandas clínicas estándar (Hz); gamma limitada por el bandpass del dataset.
+SPECTRAL_BANDS: dict[str, tuple[float, float]] = {
+    "delta": (1.0, 4.0),
+    "theta": (4.0, 8.0),
+    "alpha": (8.0, 13.0),
+    "beta": (13.0, 30.0),
+    "gamma": (30.0, 45.0),
+}
+
+
+def _band_filter(x: np.ndarray, sfreq: float, lo: float, hi: float) -> np.ndarray:
+    """Filtrado FFT por columnas (eje tiempo 0) con máscara suave de bordes."""
+    spec = np.fft.rfft(x, axis=0)
+    freqs = np.fft.rfftfreq(x.shape[0], d=1.0 / sfreq)
+    mask = (freqs >= lo) & (freqs <= hi)
+    filtered = np.zeros_like(spec)
+    filtered[mask] = spec[mask]
+    return np.fft.irfft(filtered, n=x.shape[0], axis=0)
+
+
+def spectral_band_table(
+    true: np.ndarray,
+    pred: np.ndarray,
+    sfreq: float = 160.0,
+    bands: dict[str, tuple[float, float]] | None = None,
+) -> pd.DataFrame:
+    """RMSE/ve por banda espectral de una ruta (diagnóstico temporal).
+
+    Compara ``true`` y ``pred`` ``(T, C)`` banda a banda: dónde se concentra
+    el error indica si la cabeza dinámica aporta en las oscilaciones (alpha,
+    beta) o si el residuo vive en la banda ancha. Filtrado FFT directo,
+    válido offline para análisis (los bordes de bloque pueden introducir
+    fugas menores).
+    """
+    bands = bands or SPECTRAL_BANDS
+    rows = []
+    for name, (lo, hi) in bands.items():
+        if hi >= sfreq / 2:
+            hi = sfreq / 2 - 1e-3
+        if lo >= hi:
+            continue
+        t_b = _band_filter(true.astype(np.float64), sfreq, lo, hi)
+        p_b = _band_filter(pred.astype(np.float64), sfreq, lo, hi)
+        err = t_b - p_b
+        energy = float(np.sum(t_b ** 2)) + 1e-30
+        rows.append({
+            "banda": name,
+            "rmse": float(np.sqrt(np.mean(err ** 2))),
+            "ve": float(1.0 - np.sum(err ** 2) / energy),
+            "energia_frac": float(np.sum(t_b ** 2) / (np.sum(true ** 2) + 1e-30)),
+        })
+    return pd.DataFrame(rows)

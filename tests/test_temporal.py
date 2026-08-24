@@ -206,3 +206,26 @@ def test_universal_refs_roundtrip(tmp_path):
     restored = MultiHeatmapTemporal.from_config(model.get_config())
     assert restored.temporal_window == model.temporal_window
     assert set(restored.mode_projectors) == set(model.mode_projectors)
+
+
+def test_spectral_band_table_selectivity():
+    """La tabla espectral localiza el error en la banda correcta."""
+    from eeg_transform.evaluation.metrics import spectral_band_table
+
+    sfreq = 160.0
+    t = np.arange(2000) / sfreq
+    # true: alpha pura; pred: alpha con interferencia gamma grande y delta chica
+    true = (np.sin(2 * np.pi * 10 * t)[:, None]
+            * np.ones((1, 4))).astype(np.float64)
+    pred = true + 0.3 * np.sin(2 * np.pi * 38 * t)[:, None] \
+        + 0.05 * np.sin(2 * np.pi * 2 * t)[:, None]
+
+    tabla = spectral_band_table(true, pred, sfreq=sfreq).set_index("banda")
+    # el RMSE en gamma debe superar claramente al de bandas sin error
+    assert tabla.loc["gamma", "rmse"] > 4 * tabla.loc["delta", "rmse"]
+    assert tabla.loc["gamma", "rmse"] > 4 * tabla.loc["beta", "rmse"]
+    # energía concentrada en alpha
+    assert tabla.loc["alpha", "energia_frac"] > 0.8
+    # predicción perfecta => ve ~1 y rmse ~0 en todas las bandas
+    perfecta = spectral_band_table(true, true, sfreq=sfreq)
+    assert perfecta["rmse"].max() < 1e-12
