@@ -106,7 +106,11 @@ distribución** (una 10-10 real → la 10-20, o desde otra distribución) y
   funciones existentes del paquete (`scalp_grid_matrix`, `linked_matrix`,
   `build_reference_matrix`, `inter_reference_matrix`, `spherical_spline_matrix`)
   respetando la convención matricial `X_ref = X @ M`.
-* Caché/checkpoints: `data/processed/` (ya cacheado) y `runs/topomap_refs/`.
+* Caché/checkpoints: `data/processed/` (ya cacheado, incluye
+  `mne_asa_montages.npz` con los grids ASA de MNE `standard_1005`/`standard_1020`)
+  y `runs/topomap_refs/`. Para la grilla universal, los grids ASA se alinean al
+  marco PhysioNet del canonical vía Procrustes por nombres compartidos (RMSE~0;
+  las convenciones MNE y PhysioNet difieren solo por rotación/reflexión).
 * Prefijo de commit de la rama: `feat(topomap_refs): ...`.
 
 ## Trabajo con ramas y commits
