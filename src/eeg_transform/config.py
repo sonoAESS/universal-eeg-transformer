@@ -82,6 +82,20 @@ class LeadFieldConfig:
         default_factory=lambda: [1e-2, 1e-3, 1e-4, 1e-5]
     )
 
+    def __post_init__(self):
+        # PyYAML 1.1 interpreta '1e-2' (sin punto/signo) como cadena.
+        try:
+            if self.rest_rcond is not None:
+                self.rest_rcond = float(self.rest_rcond)
+        except (TypeError, ValueError):
+            pass
+        try:
+            self.rest_rcond_candidates = [
+                float(v) for v in self.rest_rcond_candidates
+            ]
+        except (TypeError, ValueError):
+            pass
+
 
 @dataclass
 class DatasetConfig:

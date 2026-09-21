@@ -1,0 +1,84 @@
+# Humo ejecutable en CPU local para universal_refs: misma variante y
+# restricciones físicas, escala reducida (sujetos, presupuesto, ventana).
+# Sirve para validar el camino end-to-end real antes del entrenamiento
+# completo en Colab/GPU con config/universal_refs.yaml.
+data:
+  subjects: [1, 2]
+  runs: [1]
+  bandpass: [1.0, 45.0]
+  notch: []
+  unipolar_ref_ch: "Cz"
+  original_reference: "left_mastoid"
+  artifact_z_thresh: 6.0
+  bad_channel_z_thresh: 4.0
+  n_jobs: 1
+
+leadfield:
+  head_radius: 0.09
+  rel_radii: [0.87, 0.90, 0.97, 1.00]
+  sigmas: [0.33, 1.0, 0.0042, 0.33]
+  brain_radius: 0.078
+  src_grid_mm: 20.0        # grilla gruesa: humo rápido (el real usa 10 mm)
+  rest_rcond: 0.0001
+  rest_rcond_cv: true
+  rest_rcond_candidates: [1e-2, 1e-3, 1e-4, 1e-5]
+
+dataset:
+  cache_dir: data/processed
+  split_mode: block
+  test_frac: 0.2
+  val_frac: 0.2
+  seed: 42
+  max_samples_per_subject: 20000
+  dtype: float32
+
+mapping:
+  method: spline
+  montage: "10-20"
+  n_components: null
+  smoothness: 1.0e-5
+  adaptive_smoothness: true
+  grid_px: 32              # malla más fina que el real (48) para el humo
+  configs: ["10-20", "canonical"]
+  multi_max_samples_per_split: 3000
+
+model:
+  variant: universal_refs
+  latent_dim: 0
+  use_bias: false
+  kernel_regularizer_l2: 1.0e-6
+  optimizer: adam
+  learning_rate: 1.0e-3
+  comp_penalty_weight: 0.0
+  surface_loss_weight: 0.1
+  learnable_interp: true
+  field_consistency_weight: 0.1
+  xconfig_consistency_weight: 0.05   # una sola base ancla: peso suave
+  adapter_rank: 0
+  temporal_smoothness_weight: 0.0
+  learn_uncertainty: false
+  temporal_window: 16      # 100 ms @160 Hz (el real usa 32)
+  temporal_stride: 8
+  temporal_channels: 32
+  temporal_layers: 2
+  temporal_kernel: 7
+  temporal_residual_weight: 1.0
+  mode_penalty_weight: 0.05
+
+training:
+  epochs: 15
+  batch_size: 128
+  early_stop_patience: 6
+  reduce_lr_patience: 3
+  reduce_lr_factor: 0.5
+  min_lr: 1.0e-5
+  shuffle_buffer: 2000
+  prefetch: 4
+  run_dir: runs/universal_refs_smoke
+  log_file: runs/universal_refs_smoke/train.log
+  save_best_only: true
+  seed: 42
+
+evaluation:
+  n_plot_samples: 400
+  plot_channel: "Cz"

@@ -57,7 +57,7 @@ log = get_logger(__name__)
 KINDS = list(REFERENCE_KINDS)
 
 # v2 del esquema de caché: incluye las 7 referencias (universal_refs).
-MULTI_CACHE_SUBDIR = "multiconfig_v2"
+MULTI_CACHE_SUBDIR = "multiconfig_v3"
 DENSE_PREFIX = "dense-"
 
 # Subconjuntos reales del montaje canónico (posiciones coincidentes exactas).

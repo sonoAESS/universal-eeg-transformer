@@ -485,12 +485,28 @@ class UniversalEEGTransformer(tf.keras.Model):
     # ------------------------------------------------------------------
     @staticmethod
     def _zscore_loss(y_true: tf.Tensor, y_pred: tf.Tensor) -> tf.Tensor:
-        """MSE adimensional con la media/desviación del objetivo."""
+        """MSE adimensional con la media/desviación del objetivo.
+
+        Los canales objetivo SIN varianza en el lote (canales planos marcados
+        como malos, p. ej. Fp en eegbci) se excluyen de la pérdida: su std es
+        exactamente 0 y normalizar por él amplificaría el error de la
+        predicción en órdenes de magnitud absurdos.
+        """
         mean, var = tf.nn.moments(y_true, axes=[0, 1])
-        std = tf.math.sqrt(var) + 1e-8
-        t = (y_true - mean) / std
-        p = (y_pred - mean) / std
-        return tf.reduce_mean(tf.math.square(t - p))
+        std = tf.math.sqrt(var)
+        c_dim = tf.shape(y_true)[-1]
+        # válido si aporta información (std apreciable frente al máximo del lote)
+        valid = std > 1e-3 * tf.reduce_max(std) + 1e-12
+        std_safe = tf.where(valid, std, tf.ones_like(std))
+        t = (y_true - mean) / std_safe
+        p = (y_pred - mean) / std_safe
+        sq = tf.math.square(t - p) * tf.cast(valid, y_true.dtype)
+        n_valid = tf.cast(tf.reduce_sum(tf.cast(valid, tf.int32)), y_true.dtype)
+        n_lead = tf.cast(
+            tf.size(y_true) // c_dim, y_true.dtype
+        )
+        denom = tf.maximum(n_valid * n_lead, tf.constant(1.0, y_true.dtype))
+        return tf.reduce_sum(sq) / denom
 
     def _route_losses(self, sources, targets):
         """Calcula las 16 pérdidas de ruta (dict origen -> {dest: loss}).
