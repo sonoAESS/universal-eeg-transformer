@@ -75,24 +75,39 @@ Se generan desde `notebooks/generate_notebooks.py` (nbformat): editar ahí la
 lógica/regenerar, nunca el `.ipynb` directamente. Cada notebook reutiliza el
 checkpoint de `runs/` salvo `FORCE = True`.
 
-## Rama actual: `explore/multi-heatmap` (variante universal_refs)
+## Rama actual: `explore/topomap-refs` (prueba conceptual, solo notebooks)
 
-Exploración centrada en un modelo que convierte entre **7 referencias** —
-`unipolar` (vértice Cz), `linked_mastoids`, `linked_ears`, `bipolar`, `car`,
-`rest`, `laplacian` — siempre **intra-configuración** (misma densidad de
-entrada y salida), sobre **cascos reales exclusivamente** (nada de posiciones
-simuladas): eegbci 64ch canónico + subconjuntos exactos de canales reales +
-bases externas BIDS (OpenNeuro) ingeridas con su casco nativo. El modelo es un
-híbrido: núcleo lineal instantáneo + cabeza temporal de residuo (ventana
-centrada offline) en el espacio canónico.
+Exploración centrada en el enfoque **topomapa / grilla universal** (concepto de
+`/home/aess/Proyectos/eeg_to_eccog_dl`): toda señal se representa como campo de
+superficie interpolado y, desde ahí, se puede **derivar cualquier
+distribución** (una 10-10 real → la 10-20, o desde otra distribución) y
+**cambiar la referencia** de forma conjunta con el montaje. Objetivos:
 
-* Estructura propia de la rama: `multi_heatmap/` con los notebooks de Colab
-  (`01_exploracion_datos.ipynb`, `02_modelo_entrenamiento.ipynb`) — estos se
-  editan a mano, NO se regeneran desde `generate_notebooks.py`.
-* Fases acordadas (ver plan): F0 operadores físicos + tests → F1 datos
-  multi-base reales + dataset ventaneado → F2 modelo híbrido + restricciones
-  físicas → F3 config/evaluación espectral → F4 notebooks + smoke.
-* Prefijo de commit de la rama: `feat(universal_refs): ...`.
+* Montajes derivados por interpolación esférica (posiciones MNE
+  `standard_1005`/`standard_1020`, `mapping.spherical_spline_matrix`); el
+  canonical eegbci 64ch ya vive en `standard_1005` (loader.py).
+* Topomapas estilo MNE (disco circular, medido negro / interpolado gris).
+* Nueva referencia **`average_all`**: `M = I - w·1ᵀ` con `w = media sobre los
+  píxeles del topomapa` (`mapping.scalp_grid_matrix`); hay más píxeles que
+  canales, así que el promedio se acerca más al infinito físico
+  (esperado CAR < avg_all < REST, sin invertir el leadfield).
+* **Conversión montaje + referencia con un modelo** entrenado *dentro de los
+  notebooks* (TF/Keras), p. ej. **10-10 bipolar → 10-20 monopolar Cz**,
+  evaluada contra la línea base analítica (interpolación + re-referenciación).
+* Probar con datos reales cacheados (eegbci 64ch, sujetos 1-2, 7 refs): sin
+  descargas y sin Drive.
+
+* **Solo notebooks**: NO se toca `src/`, NO hay scripts ni tests nuevos.
+  Estructura: `topomap_refs/` (`01_topomapas_y_montajes.ipynb`,
+  `02_referencia_average_all.ipynb`, `03_modelo_montaje_referencia.ipynb`,
+  `README.md`) — se editan a mano, NO se regeneran desde
+  `generate_notebooks.py` (igual que `multi_heatmap/`).
+* Las referencias/montajes nuevos se definen DENTRO de los notebooks usando
+  funciones existentes del paquete (`scalp_grid_matrix`, `linked_matrix`,
+  `build_reference_matrix`, `inter_reference_matrix`, `spherical_spline_matrix`)
+  respetando la convención matricial `X_ref = X @ M`.
+* Caché/checkpoints: `data/processed/` (ya cacheado) y `runs/topomap_refs/`.
+* Prefijo de commit de la rama: `feat(topomap_refs): ...`.
 
 ## Trabajo con ramas y commits
 
