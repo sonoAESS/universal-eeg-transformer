@@ -93,6 +93,22 @@ def cmd_eval(cfg) -> None:
         plots.plot_multiconfig_bars(metrics_df, run_dir)
         plots.plot_multiconfig_scalps(model, data, run_dir)
 
+        if cfg.model.variant == "universal_refs" and cfg.model.temporal_window > 0:
+            w = cfg.model.temporal_window
+            print(f"\n======== MULTI-CONFIG WINDOWED (TEST): ventana {w} ========")
+            print("Predicción causal por ventana deslizante (stride 1, salida "
+                  "del último paso); el calentamiento inicial se descarta.")
+            wind = metrics.evaluate_multiconfig_windowed(
+                model, data, split="test", window=w, stride=1)
+            wsumm = metrics.summarize_multiconfig(wind)
+            print(wsumm.to_string(formatters={
+                "rmse_diag_uV": "{:.3f}".format, "r_diag": "{:.4f}".format,
+                "rmse_cross_uV": "{:.3f}".format, "r_cross": "{:.4f}".format,
+                "ve_cross": "{:.3f}".format,
+                "rmse_ana_cross_uV": "{:.3f}".format,
+                "r_ana_cross": "{:.4f}".format, "ve_ana_cross": "{:.3f}".format}))
+            wind.to_csv(run_dir / "metrics_windowed_test.csv", index=False)
+
         if cfg.model.variant in ("multi_heatmap", "multi_heatmap_v2"):
             surface_df = metrics.evaluate_multiconfig_surface_routes(
                 model, data, split="test")

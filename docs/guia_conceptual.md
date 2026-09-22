@@ -147,6 +147,7 @@ igual en la retropropagación. También se registran métricas en unidades reale
 | `montage_*` | Un montaje fuente de `C_s` electrodos entra por una **proyección fija** `P` y el modelo predice las referencias canónicas (64). | Unificar un montaje concreto al espacio canónico. |
 | `multi_montage` | Entrena **varias configuraciones a la vez** (19/64/128/256) con el mismo autoencoder; cada una se embebe con `P_s` y se lee con `Q_s`, y el modelo predice referencias **en la propia configuración**. | Un modelo universal para cualquier configuración de electrodos. |
 | `multi_heatmap` | Igual que `multi_montage` + **campo de superficie**: además del MSE por electrodo, la actividad se lee y se entrena como *heatmap* sobre una **malla compartida** del cuero cabelludo (la de los topomapas). | Un modelo universal cuyo topomapa también es fiel, no solo los electrodos. |
+| `universal_refs` | Núcleo lineal + **cabeza temporal de residuo** (convolucional centrada o **recurrente causal** `gru`/`lstm`/`rnn`): el contexto temporal de lo medido corrige lo predicho. | Capturar la dinámica temporal (ventana de medida → predicción). |
 
 ### Variante `multi_montage` (nueva)
 Ecuación por configuración `s`:
@@ -195,6 +196,34 @@ interpolación suave sobre el casquete).
 
 Los resultados se guardan en `runs/<variante>/metrics_surface_test.csv` con
 columnas `rmse_field`/`r_field`/`ve_field` por ruta y configuración.
+
+### Variante `universal_refs`: núcleo lineal + cabeza temporal de residuo
+
+`universal_refs` mantiene el núcleo lineal instantáneo (el mapa físico
+`A_{s→d}`) y añade una **cabeza temporal de residuo**: la señal canónica
+proyectada `u = x·P_s` se enmarca en ventanas consecutivas y una red ligera
+predice la *corrección* dinámica que se suma a la salida lineal antes de `Q_s`.
+Con la capa final de la cabeza a **cero** el arranque coincide exactamente con
+el modelo instantáneo (ablation trivial, los pesos del residuo se "encienden"
+solo si aportan).
+
+La anatomía de la cabeza la fija `model.temporal_cell`:
+
+- `conv` (por defecto): bloques *depthwise+pointwise* con conexión residual
+  sobre la ventana **centrada** (`padding="same"`); captura patrones locales
+  acausales.
+- `gru` / `lstm` / `rnn`: **una célula recurrente causal** (una capa, units =
+  `temporal_channels`) tras la proyección de entrada. El residuo en el
+  instante `t` depende solo de lo medido hasta `t` ("una ventana de tiempo de
+  lo que se está midiendo contra lo que se predice") y puede generalizar a
+  secuencias más largas que la ventana de entrenamiento.
+
+La evaluación estándar por rutas alimenta tensores 2-D instantáneos y por
+tanto **desactiva** la cabeza temporal; para medir el beneficio de la
+recurrencia en inferencia se usa la **evaluación ventaneada**
+(`evaluate_multiconfig_windowed`): ventanas causales deslizantes y la salida
+del último paso, comparando solo los instantes con contexto completo
+(`metrics_windowed_test.csv`).
 
 ---
 

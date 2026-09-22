@@ -183,6 +183,34 @@ def evaluate_multiconfig(
     return metrics_df, summary
 
 
+def evaluate_multiconfig_windowed(
+    cfg: EEGTransformConfig,
+    ds: MultiReferenceDataset,
+    model,
+    data: object | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Métricas por configuración con la cabeza temporal activa (causal).
+
+    Igual esquema que :func:`evaluate_multiconfig` (diagonal/cruzada + línea
+    base analítica), pero evaluando las rutas por **ventanas causales**:
+    cada instante se predice desde la ventana de contexto previo y se conserva
+    el último paso. Es la medida que captura el beneficio de la recurrencia en
+    inferencia; con ``temporal_window = 0`` coincide con la evaluación
+    instantánea.
+
+    Returns
+    -------
+    ``(metrics_df, summary)``.
+    """
+    data = data or multiconfig_data(cfg, ds)
+    metrics_df = metrics.evaluate_multiconfig_windowed(
+        model, data, split="test",
+        window=cfg.model.temporal_window, stride=1,
+    )
+    summary = metrics.summarize_multiconfig(metrics_df)
+    return metrics_df, summary
+
+
 def plot_multiconfig_heatmap(metrics_df: pd.DataFrame, title: str):
     """Figura heatmap RMSE (µV, escala log10) por config origen→destino."""
     plots.set_plot_backend("inline")

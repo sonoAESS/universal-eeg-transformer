@@ -75,7 +75,11 @@ Se generan desde `notebooks/generate_notebooks.py` (nbformat): editar ahí la
 lógica/regenerar, nunca el `.ipynb` directamente. Cada notebook reutiliza el
 checkpoint de `runs/` salvo `FORCE = True`.
 
-## Rama actual: `explore/topomap-refs` (prueba conceptual, solo notebooks)
+## Rama actual: `explore/topomap-refs` (conceptual topomap + recurrencia)
+
+Esta rama aloja dos trabajos:
+
+### 1. Topomapa / grilla universal (prueba conceptual, SOLO notebooks)
 
 Exploración centrada en el enfoque **topomapa / grilla universal** (concepto de
 `/home/aess/Proyectos/eeg_to_eccog_dl`): toda señal se representa como campo de
@@ -111,7 +115,37 @@ distribución** (una 10-10 real → la 10-20, o desde otra distribución) y
   y `runs/topomap_refs/`. Para la grilla universal, los grids ASA se alinean al
   marco PhysioNet del canonical vía Procrustes por nombres compartidos (RMSE~0;
   las convenciones MNE y PhysioNet difieren solo por rotación/reflexión).
-* Prefijo de commit de la rama: `feat(topomap_refs): ...`.
+* Prefijo de commit del bloque notebook: `feat(topomap_refs): ...`.
+
+### 2. Recurrencia en `universal_refs` (código en `src/`, esta misma rama)
+
+La variante `universal_refs` (`MultiHeatmapTemporal`) añade a su núcleo lineal
+instantáneo una **cabeza temporal de residuo** que predice la corrección
+dinámica sobre una ventana de lo medido. `model.temporal_cell` selecciona la
+arquitectura de la cabeza:
+
+* `conv` (por defecto): bloques depthwise+pointwise sobre ventana **centrada**
+  (`padding="same"`), acausal.
+* `gru` / `lstm` / `rnn`: **una célula recurrente causal** (units =
+  `temporal_channels`) — "una ventana de tiempo de lo que se está midiendo
+  contra lo que se predice"; generaliza a secuencias más largas que la ventana
+  de entrenamiento. `temporal_kernel` no aplica fuera de `conv`.
+
+Puntos importantes:
+
+* La evaluación estándar (`evaluate_multiconfig_routes`) alimenta tensores
+  2-D y **desactiva** la cabeza. El beneficio temporal se mide con la
+  **evaluación ventaneada** (`evaluate_multiconfig_windowed`,
+  `predict_multiconfig_windowed`): ventanas causales deslizantes, salida del
+  último paso, comparando los instantes con contexto completo. En el CLI se
+  genera `metrics_windowed_test.csv` para `universal_refs` con
+  `temporal_window > 0`; en notebooks vía `nb.evaluate_multiconfig_windowed`.
+* Las cabezas se inicializan a cero: el arranque es idéntico al modelo
+  lineal (ablation trivial) para cualquier `temporal_cell`.
+* Variante de ejecución: `config/universal_refs_gru.yaml`
+  (`temporal_cell: gru`, `runs/universal_refs_gru`).
+* Tests: `tests/test_temporal.py` (parametrizado por célula + evaluador
+  ventaneado). Prefijo de commit de este bloque: `feat(universal_refs): ...`.
 
 ## Trabajo con ramas y commits
 

@@ -12,6 +12,7 @@ Cubre:
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 tf = pytest.importorskip("tensorflow")
@@ -83,7 +84,7 @@ class _FakeDataset:
                    meta={"unipolar_ref_ch": "Cz"})
 
 
-def _multi_cfg(tmp_path, window=0, budget=60, stride=None):
+def _multi_cfg(tmp_path, window=0, budget=60, stride=None, cell="conv"):
     cfg = EEGTransformConfig.from_dict({
         "dataset": {"cache_dir": str(tmp_path)},
         "leadfield": {"src_grid_mm": 30.0},
@@ -93,6 +94,7 @@ def _multi_cfg(tmp_path, window=0, budget=60, stride=None):
                   "temporal_channels": 16,
                   "temporal_layers": 1,
                   "temporal_kernel": 5,
+                  "temporal_cell": cell,
                   "mode_penalty_weight": 0.1 if window else 0.0},
         "mapping": {
             "method": "spline",
@@ -129,9 +131,10 @@ def test_windowed_dataset_shapes_and_contiguity(tmp_path):
     assert np.allclose(second, canon_train["car"][4:12], atol=1e-4)
 
 
-def test_temporal_head_zero_init_matches_instantaneous(tmp_path):
+@pytest.mark.parametrize("cell", ["conv", "gru", "lstm", "rnn"])
+def test_temporal_head_zero_init_matches_instantaneous(tmp_path, cell):
     ds = _FakeDataset.make()
-    cfg = _multi_cfg(tmp_path, window=8)
+    cfg = _multi_cfg(tmp_path, window=8, cell=cell)
     data = build_multiconfig(ds, cfg, force=True)
     model = build_multiconfig_model(cfg, data)
 
@@ -149,13 +152,14 @@ def test_temporal_head_zero_init_matches_instantaneous(tmp_path):
     for k in KINDS:
         assert np.allclose(out_dyn[k].numpy(), out_lin[k].numpy(), atol=1e-6), (
             f"con cabeza a cero la ruta {k} debe coincidir con el modelo "
-            f"instantáneo"
+            f"instantáneo (cell={cell})"
         )
 
 
-def test_residual_updates_after_train_step(tmp_path):
+@pytest.mark.parametrize("cell", ["conv", "gru", "lstm", "rnn"])
+def test_residual_updates_after_train_step(tmp_path, cell):
     ds = _FakeDataset.make()
-    cfg = _multi_cfg(tmp_path, window=8)
+    cfg = _multi_cfg(tmp_path, window=8, cell=cell)
     data = build_multiconfig(ds, cfg, force=True)
     model = build_multiconfig_model(cfg, data)
     model.core.ensure_built()
@@ -180,7 +184,7 @@ def test_residual_updates_after_train_step(tmp_path):
         not np.allclose(b, a.numpy())
         for b, a in zip(head_vars_before, model.head.trainable_variables)
     )
-    assert changed, "la cabeza temporal no se actualizó en train_step"
+    assert changed, f"la cabeza temporal (cell={cell}) no se actualizó"
 
 
 def test_mode_projector_annihilates_low_orders():
@@ -195,9 +199,10 @@ def test_mode_projector_annihilates_low_orders():
     assert np.allclose(p, p.T, atol=1e-6)
 
 
-def test_universal_refs_roundtrip(tmp_path):
+@pytest.mark.parametrize("cell", ["conv", "gru", "lstm", "rnn"])
+def test_universal_refs_roundtrip(tmp_path, cell):
     ds = _FakeDataset.make()
-    cfg = _multi_cfg(tmp_path, window=8)
+    cfg = _multi_cfg(tmp_path, window=8, cell=cell)
     data = build_multiconfig(ds, cfg, force=True)
     model = build_multiconfig_model(cfg, data)
     model.core.ensure_built()
@@ -205,6 +210,8 @@ def test_universal_refs_roundtrip(tmp_path):
 
     restored = MultiHeatmapTemporal.from_config(model.get_config())
     assert restored.temporal_window == model.temporal_window
+    assert restored.temporal_cell == model.temporal_cell
+    assert restored.head.cell == model.head.cell
     assert set(restored.mode_projectors) == set(model.mode_projectors)
 
 
@@ -229,3 +236,62 @@ def test_spectral_band_table_selectivity():
     # predicción perfecta => ve ~1 y rmse ~0 en todas las bandas
     perfecta = spectral_band_table(true, true, sfreq=sfreq)
     assert perfecta["rmse"].max() < 1e-12
+
+
+@pytest.mark.parametrize("cell", ["conv", "gru"])
+def test_windowed_eval_shapes_and_alignment(tmp_path, cell):
+    """El evaluador ventaneado alinea las predicciones y respeta la causalidad."""
+    from eeg_transform.evaluation.metrics import (
+        evaluate_multiconfig_windowed,
+        predict_multiconfig_windowed,
+    )
+
+    ds = _FakeDataset.make()
+    cfg = _multi_cfg(tmp_path, window=8, stride=1, cell=cell)
+    data = build_multiconfig(ds, cfg, force=True)
+    model = build_multiconfig_model(cfg, data)
+    model.core.ensure_built()
+
+    test_n = ds.split_idx["test"].shape[0]
+    window = 8
+    expected = test_n - window + 1
+    label = "canonical"
+
+    preds = predict_multiconfig_windowed(model, data, split="test",
+                                         window=window, stride=1)
+    for s in KINDS:
+        for d in KINDS:
+            arr = preds[label][s][d]
+            assert arr.shape[0] == expected, (cell, s, d, arr.shape)
+
+    # cabeza a cero => la predicción ventaneada (residuo nulo) coincide con la
+    # predicción instantánea del modelo sobre la muestra final de cada ventana
+    target_idx = ds.split_idx["test"][window - 1:]
+    ref_s = ds.refs["unipolar"][target_idx].astype(np.float32)
+    inst = model(tf.convert_to_tensor(ref_s), cfg=label, source="unipolar")
+    win = preds[label]["unipolar"]["unipolar"]
+    assert np.allclose(win, inst["unipolar"].numpy(), atol=1e-6)
+
+    # el DataFrame de métricas ventaneadas conserva el esquema por ruta
+    rules = evaluate_multiconfig_windowed(model, data, split="test",
+                                          window=window, stride=1)
+    assert len(rules) == len(data.order) * len(KINDS) ** 2
+    assert sorted(rules.columns) == sorted(
+        ["config", "origen", "destino", "mse", "rmse", "mae", "r", "ve",
+         "rmse_ana", "r_ana", "ve_ana"])
+
+
+def test_windowed_eval_falls_back_when_window_0(tmp_path):
+    """Con ventana 0 el evaluador ventaneado delega en el instantáneo."""
+    from eeg_transform.evaluation import metrics
+    from eeg_transform.evaluation.metrics import evaluate_multiconfig_windowed
+
+    ds = _FakeDataset.make()
+    cfg = _multi_cfg(tmp_path, window=0)
+    data = build_multiconfig(ds, cfg, force=True)
+    model = build_multiconfig_model(cfg, data)
+    model.core.ensure_built()
+
+    rules = evaluate_multiconfig_windowed(model, data, split="test", window=0)
+    base = metrics.evaluate_multiconfig_routes(model, data, split="test")
+    pd.testing.assert_frame_equal(rules, base)

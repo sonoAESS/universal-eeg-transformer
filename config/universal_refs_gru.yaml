@@ -1,0 +1,92 @@
+# Variante universal_refs con cabeza temporal RECURRENTE (celda GRU):
+#   * idéntica a universal_refs.yaml salvo temporal_cell: gru y run_dir propio.
+#   * La célula recurrente es causal por construcción: el residuo en t se
+#     predice desde lo medido hasta t (ventana de tiempo de lo que se mide
+#     contra lo que se predice) y, a diferencia de la convolución centrada,
+#     puede generalizar a secuencias más largas que la ventana de entrenamiento.
+#   * Evaluación ventaneada (predict/evaluate_multiconfig_windowed) para medir
+#     el beneficio en inferencia: ventana deslizante, salida del último paso.
+#   * temporal_kernel no aplica (solo conv); se deja por herencia.
+data:
+  subjects: [1, 2]
+  runs: [1, 2]
+  bandpass: [1.0, 45.0]
+  notch: []
+  unipolar_ref_ch: "Cz"
+  original_reference: "left_mastoid"
+  artifact_z_thresh: 6.0
+  bad_channel_z_thresh: 4.0
+  n_jobs: 1
+
+leadfield:
+  head_radius: 0.09
+  rel_radii: [0.87, 0.90, 0.97, 1.00]
+  sigmas: [0.33, 1.0, 0.0042, 0.33]
+  brain_radius: 0.078
+  src_grid_mm: 10.0
+  rest_rcond: 0.0001
+  rest_rcond_cv: true
+  rest_rcond_candidates: [1e-2, 1e-3, 1e-4, 1e-5]
+
+dataset:
+  cache_dir: data/processed
+  split_mode: block
+  test_frac: 0.2
+  val_frac: 0.2
+  seed: 42
+  max_samples_per_subject: 60000
+  dtype: float32
+
+mapping:
+  method: spline
+  montage: "10-20"
+  n_components: null
+  smoothness: 1.0e-5
+  adaptive_smoothness: true
+  grid_px: 48
+  configs: ["canonical"]
+  multi_max_samples_per_split: 40000
+
+model:
+  variant: universal_refs
+  latent_dim: 0            # latente = nº de canales canónico (64)
+  use_bias: false
+  kernel_regularizer_l2: 1.0e-6
+  optimizer: adam
+  learning_rate: 1.0e-3
+  comp_penalty_weight: 0.0
+  surface_loss_weight: 0.1
+  # --- heredadas de multi_heatmap_v2 ---
+  learnable_interp: true
+  field_consistency_weight: 0.1
+  xconfig_consistency_weight: 0.1
+  adapter_rank: 0
+  temporal_smoothness_weight: 0.0
+  learn_uncertainty: false
+  # --- cabeza temporal de residuo: RECURRENTE (GRU causal) ---
+  temporal_window: 32      # ~200 ms @160 Hz de contexto medido
+  temporal_stride: 8       # solape 75% entre ventanas de entrenamiento
+  temporal_channels: 64
+  temporal_layers: 2
+  temporal_kernel: 7       # sin efecto con célula recurrente
+  temporal_cell: gru       # conv | gru | lstm | rnn
+  temporal_residual_weight: 1.0
+  mode_penalty_weight: 0.05
+
+training:
+  epochs: 60
+  batch_size: 512
+  early_stop_patience: 10
+  reduce_lr_patience: 5
+  reduce_lr_factor: 0.5
+  min_lr: 1.0e-5
+  shuffle_buffer: 4000
+  prefetch: 4
+  run_dir: runs/universal_refs_gru
+  log_file: runs/universal_refs_gru/train.log
+  save_best_only: true
+  seed: 42
+
+evaluation:
+  n_plot_samples: 400
+  plot_channel: "Cz"

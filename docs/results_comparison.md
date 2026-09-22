@@ -161,3 +161,15 @@ canonical `0.86/0.81`, dense `0.51–0.64/0.26–0.34`.
   extra son interpolaciones de 19 y el promedio REST del montaje denso no
   representa el de 64 ch. Exploración de alternativas (RESTRIDGE/lead field)
   en curso.
+
+## Variantes temporales / recurrentes (universal_refs)
+
+Las variantes con cabeza temporal de residuo (`universal_refs`,
+`temporal_cell: conv` o recurrente `gru`/`lstm`/`rnn`) **no comparten la
+tabla anterior**: la evaluación estándar por rutas alimenta tensores 2-D
+instantáneos que desactivan la cabeza. El beneficio temporal se mide con la
+**evaluación ventaneada** (`evaluate_multiconfig_windowed`): ventanas causales
+deslizantes y salida del último paso, reportada aparte en
+`metrics_windowed_test.csv`. Añadir aquí los resultados (RMSE/r/VE por ruta y
+config, con su línea base analítica) al disponer de una ejecución de
+`config/universal_refs_gru.yaml`.

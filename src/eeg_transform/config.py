@@ -254,6 +254,12 @@ class ModelConfig:
     temporal_channels: int = 64
     temporal_layers: int = 2
     temporal_kernel: int = 7
+    # Arquitectura de la cabeza temporal: "conv" (bloques depthwise+pointwise
+    # con ventana centrada) o una célula recurrente causal de una sola capa:
+    # "gru", "lstm" o "rnn". La RNN consume lo medido hasta el instante t para
+    # corregir lo predicho en t (ventana de tiempo medida -> predicción); con
+    # la célula recurrente ``temporal_kernel`` no tiene efecto.
+    temporal_cell: str = "conv"
     # Peso del residuo temporal sobre la salida lineal (regulariza cuánto
     # puede desviarse la corrección dinámica del mapa físico).
     temporal_residual_weight: float = 1.0
@@ -282,6 +288,11 @@ class ModelConfig:
                 setattr(self, name, float(getattr(self, name)))
             except (TypeError, ValueError):
                 pass
+        if self.temporal_cell not in ("conv", "gru", "lstm", "rnn"):
+            raise ValueError(
+                f"temporal_cell inválido: {self.temporal_cell!r}. Use 'conv', "
+                f"'gru', 'lstm' o 'rnn'."
+            )
 
 
 @dataclass

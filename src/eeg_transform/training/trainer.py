@@ -91,6 +91,7 @@ def build_multiconfig_model(cfg, data):
             temporal_channels=cfg.model.temporal_channels,
             temporal_layers=cfg.model.temporal_layers,
             temporal_kernel=cfg.model.temporal_kernel,
+            temporal_cell=cfg.model.temporal_cell,
             temporal_residual_weight=cfg.model.temporal_residual_weight,
             mode_penalty_weight=cfg.model.mode_penalty_weight,
         )

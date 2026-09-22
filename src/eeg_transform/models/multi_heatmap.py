@@ -391,30 +391,50 @@ class MultiHeatmapAutoencoder(MultiMontageAutoencoder):
 
 
 class TemporalResidualHead(tf.keras.layers.Layer):
-    """Cabeza convolucional ligera que predice el residuo dinámico.
+    """Cabeza ligera que predice el residuo dinámico.
 
-    Opera en el espacio canónico sobre la ventana centrada ``(T_w, C)``:
-    bloques depthwise+pointwise con conexión residual capturan patrones
-    temporales locales; las cabezas por destino son convoluciones ``1×1``
-    inicializadas a **cero**, de modo que con pesos iniciales la salida es
-    exactamente la del modelo instantáneo lineal (ablation trivial).
+    Opera sobre la ventana temporal ``(T_w, C)`` en el espacio canónico:
+
+    * **``cell="conv"``** (por defecto): bloques depthwise+pointwise con
+      conexión residual sobre la ventana centrada ``padding="same"``; captura
+      patrones locales acausales.
+    * **``cell`` recurrente** (``"gru"``/``"lstm"``/``"rnn"``): una sola capa
+      recurrente causal tras ``in_proj``; el residuo en ``t`` depende solo de
+      lo medido hasta ``t`` (ventana de medida -> predicción) y puede
+      generalizar a secuencias más largas que la ventana de entrenamiento.
+
+    Las cabezas por destino son proyecciones ``1×1`` inicializadas a **cero**,
+    de modo que con pesos iniciales la salida es exactamente la del modelo
+    instantáneo lineal (ablation trivial).
     """
 
     def __init__(self, kinds, channels=64, num_layers=2, kernel_size=7,
-                 **kwargs):
+                 cell="conv", **kwargs):
         super().__init__(**kwargs)
         self.kinds = list(kinds)
         self.channels = int(channels)
         self.num_layers = int(num_layers)
         self.kernel_size = int(kernel_size)
+        self.cell = cell
         self.blocks = []
-        for i in range(self.num_layers):
-            self.blocks.append([
-                tf.keras.layers.DepthwiseConv1D(
-                    self.kernel_size, padding="same", name=f"tdw{i}"),
-                tf.keras.layers.Conv1D(self.channels, 1, name=f"tpw{i}"),
-                tf.keras.layers.Activation("gelu"),
-            ])
+        self.rnn = None
+        if cell == "conv":
+            for i in range(self.num_layers):
+                self.blocks.append([
+                    tf.keras.layers.DepthwiseConv1D(
+                        self.kernel_size, padding="same", name=f"tdw{i}"),
+                    tf.keras.layers.Conv1D(self.channels, 1, name=f"tpw{i}"),
+                    tf.keras.layers.Activation("gelu"),
+                ])
+        else:
+            rnn_kinds = {
+                "gru": tf.keras.layers.GRU,
+                "lstm": tf.keras.layers.LSTM,
+                "rnn": tf.keras.layers.SimpleRNN,
+            }
+            self.rnn = rnn_kinds[cell](
+                self.channels, return_sequences=True, name="trnn0",
+            )
         # proyección de entrada a `channels` (pointwise)
         self.in_proj = tf.keras.layers.Conv1D(self.channels, 1, name="tin")
         # las cabezas por destino se crean en build() (necesitan units=C)
@@ -431,15 +451,19 @@ class TemporalResidualHead(tf.keras.layers.Layer):
 
     def call(self, u):                      # u: (..., T, C)
         h = self.in_proj(u)
-        for dw, pw, act in self.blocks:
-            h = h + act(pw(dw(h)))
+        if self.cell == "conv":
+            for dw, pw, act in self.blocks:
+                h = h + act(pw(dw(h)))
+        else:
+            h = self.rnn(h)
         return {k: head(h) for k, head in self.heads.items()}
 
     def get_config(self):
         cfg = super().get_config()
         cfg.update({"kinds": self.kinds, "channels": self.channels,
                     "num_layers": self.num_layers,
-                    "kernel_size": self.kernel_size})
+                    "kernel_size": self.kernel_size,
+                    "cell": self.cell})
         return cfg
 
 
@@ -489,6 +513,7 @@ class MultiHeatmapTemporal(MultiHeatmapAutoencoder):
         temporal_channels: int = 64,
         temporal_layers: int = 2,
         temporal_kernel: int = 7,
+        temporal_cell: str = "conv",
         temporal_residual_weight: float = 1.0,
         mode_penalty_weight: float = 0.0,
         **kwargs,
@@ -497,13 +522,14 @@ class MultiHeatmapTemporal(MultiHeatmapAutoencoder):
                          out_maps=out_maps, surfaces=surfaces, **kwargs)
         self.temporal_window = int(temporal_window)
         self.temporal_stride = max(1, int(temporal_stride))
+        self.temporal_cell = str(temporal_cell)
         self.temporal_residual_weight = float(temporal_residual_weight)
         self.mode_penalty_weight = float(mode_penalty_weight)
 
         self.head = TemporalResidualHead(
             kinds=self.kinds, channels=temporal_channels,
             num_layers=temporal_layers, kernel_size=temporal_kernel,
-            name="temporal_head",
+            cell=self.temporal_cell, name="temporal_head",
         )
         if self.n_canonical:
             self.head.build(tf.TensorShape([None, None, self.n_canonical]))
@@ -616,6 +642,7 @@ class MultiHeatmapTemporal(MultiHeatmapAutoencoder):
             },
             "temporal_window": self.temporal_window,
             "temporal_stride": self.temporal_stride,
+            "temporal_cell": self.temporal_cell,
             "temporal_residual_weight": self.temporal_residual_weight,
             "mode_penalty_weight": self.mode_penalty_weight,
             "head_cfg": self.head.get_config(),
@@ -646,6 +673,7 @@ class MultiHeatmapTemporal(MultiHeatmapAutoencoder):
             field_kind=config.get("field_kind", DEFAULT_FIELD_KIND),
             temporal_window=config.get("temporal_window", 0),
             temporal_stride=config.get("temporal_stride", 1),
+            temporal_cell=config.get("temporal_cell", "conv"),
             temporal_residual_weight=config.get("temporal_residual_weight", 1.0),
             mode_penalty_weight=config.get("mode_penalty_weight", 0.0),
         )

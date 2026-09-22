@@ -335,6 +335,98 @@ def summarize_multiconfig(metrics_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def predict_multiconfig_windowed(
+    model, data, split: str = "test", window: int | None = None, stride: int = 1,
+) -> dict[str, dict[str, dict[str, np.ndarray]]]:
+    """Predice todas las rutas por config desde ventanas causales deslizantes.
+
+    A diferencia de :func:`predict_multiconfig_routes`, que alimenta tensores
+    2-D instantáneos ``(n, C_s)`` y desactiva la cabeza temporal (el residuo
+    solo actúa con rank-3), aquí cada muestra se predice desde la ventana de
+    contexto ``[t-window+1, t]`` y se conserva la salida del **último paso**
+    (inferencia causal/streaming real: lo medido hasta ``t`` corrige lo
+    predicho en ``t``). El calentamiento inicial (las ``window-1`` muestras sin
+    contexto completo) queda fuera de las predicciones.
+
+    Returns
+    -------
+    ``{config: {origen: {destino: (n_w, C_s)}}}`` alineado con
+    ``refs[split][*][idx]`` siendo ``idx = arange(window-1, n, stride)``.
+    Con ``window <= 0`` delega en :func:`predict_multiconfig_routes`.
+    """
+    window = int(window if window is not None
+                 else getattr(model, "temporal_window", 0))
+    if window <= 0:
+        return predict_multiconfig_routes(model, data, split=split)
+    stride = max(1, int(stride))
+    out = {}
+    for label in data.order:
+        mc = data.configs[label]
+        n = mc.refs[split][KINDS[0]].shape[0]
+        out[label] = {}
+        for s in KINDS:
+            arr = mc.refs[split][s]
+            # sliding_window_view añade la ventana como eje TRAILING, se
+            # reordena a (n_w, window, C) para la cabeza temporal
+            wins = np.lib.stride_tricks.sliding_window_view(
+                arr, window, axis=0
+            )[::stride].transpose(0, 2, 1)
+            preds = model(tf.convert_to_tensor(wins, dtype=tf.float32),
+                          cfg=label, source=s)
+            out[label][s] = {d: preds[d].numpy()[:, -1, :] for d in KINDS}
+    return out
+
+
+def evaluate_multiconfig_windowed(
+    model, data, split: str = "test", window: int | None = None, stride: int = 1,
+) -> pd.DataFrame:
+    """Métricas por ruta con la cabeza temporal activa (ventanas causales).
+
+    Mismo esquema de columnas que :func:`evaluate_multiconfig_routes` (con la
+    línea base analítica ``T_d @ pinv(T_s)``), pero las predicciones se generan
+    por ventana causal :func:`predict_multiconfig_windowed` y solo se comparan
+    los instantes con contexto completo. Es la medida que captura el beneficio
+    de la recurrencia/contexto temporal en inferencia.
+
+    Con ``window <= 0`` delega en :func:`evaluate_multiconfig_routes`.
+    """
+    window = int(window if window is not None
+                 else getattr(model, "temporal_window", 0))
+    if window <= 0:
+        return evaluate_multiconfig_routes(model, data, split=split)
+    stride = max(1, int(stride))
+    preds = predict_multiconfig_windowed(model, data, split=split,
+                                         window=window, stride=stride)
+    rows = []
+    for label in data.order:
+        mc = data.configs[label]
+        n = mc.refs[split][KINDS[0]].shape[0]
+        idx = np.arange(0, n - window + 1, stride) + window - 1
+        targets = {k: mc.refs[split][k][idx] for k in KINDS}
+        sources = {k: mc.refs[split][k][idx] for k in KINDS}
+        for s in KINDS:
+            for d in KINDS:
+                st = _route_stats(targets[d], preds[label][s][d])
+                ana = inter_reference_matrix(
+                    s, d, mc.n_channels,
+                    unipolar_ref_index=mc.unipolar_ref_index,
+                    lead_field=mc.leadfield,
+                    rest_rcond=mc.rest_rcond,
+                    positions=np.asarray(mc.positions, dtype=np.float64),
+                )
+                sta = _route_stats(targets[d], sources[s] @ ana)
+                rows.append({
+                    "config": label,
+                    "origen": s,
+                    "destino": d,
+                    "mse": st["mse"], "rmse": st["rmse"], "mae": st["mae"],
+                    "r": st["r"], "ve": st["ve"],
+                    "rmse_ana": sta["rmse"], "r_ana": sta["r"],
+                    "ve_ana": sta["ve"],
+                })
+    return pd.DataFrame(rows)
+
+
 def _grid_valid(grid_px: int) -> np.ndarray:
     """Máscara del disco de la malla compartida (igual que ``scalp_grid_matrix``)."""
     x = np.linspace(-1.0, 1.0, grid_px)
