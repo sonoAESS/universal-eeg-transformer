@@ -116,6 +116,101 @@ def region_metrics(rec: np.ndarray, true: np.ndarray, mask: np.ndarray) -> dict:
     }
 
 
+# --- mejoras 1-3: techo Wiener, sLORETA y group-sparse espacio-temporal ----
+
+def power_norm_sq(a: np.ndarray, iters: int = 25) -> float:
+    """Norma espectral al cuadrado :math:`\\|A^T A\\|_2` por método de potencias.
+
+    Evita el SVD completo de la matriz de forward grande (2006 fuentes).
+    """
+    n = a.shape[1]
+    x = np.ones((n, 1))
+    for _ in range(iters):
+        y = a.T @ (a @ x)
+        x = y / np.linalg.norm(y)
+    return float(np.linalg.norm(a.T @ (a @ x)) / np.linalg.norm(x))
+
+
+def fista_group_lasso(
+    s_f: np.ndarray,
+    y: np.ndarray,
+    lam: float,
+    iters: int = 200,
+) -> np.ndarray:
+    """Regularización L2,1 (soporte de dipolos compartido en el tiempo).
+
+    Minimiza ``0.5||Y - X S^T||_F^2 + lam * sum_i ||X[:, i]||_2`` con
+    ``X (T, N_src)``; el término de grupo obliga a que los dipolos activos
+    sean los **mismos** en todo el intervalo (los ``N_ACTIVE`` verdaderos
+    son fijos por escena). FISTA con prox de suavizado por fila.
+    """
+    m, n = y.shape[0], s_f.shape[1]
+    l2 = power_norm_sq(s_f)
+    step = 1.0 / l2
+    x = np.zeros((m, n))
+    z = np.zeros_like(x)
+    th = 1.0
+    for _ in range(iters):
+        grad = (z @ s_f.T - y) @ s_f
+        xn = z - step * grad
+        rn = np.linalg.norm(xn, axis=0)
+        shrink = np.maximum(rn - step * lam, 0.0) / (rn + 1e-30)
+        xn = xn * shrink[None, :]
+        thn = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * th * th))
+        z = xn + ((th - 1.0) / thn) * (xn - x)
+        x, th = xn, thn
+    return x
+
+
+def pick_lambda(
+    s_f: np.ndarray, y: np.ndarray, target: int,
+    coarse_iters: int = 60, min_c: float = 1e-4, max_c: float = 5.0,
+) -> float:
+    """Elige ``lam`` (absoluto) con soporte ~ ``target`` dipolos activos.
+
+    La búsqueda es binaria sobre la fracción ``c`` de la norma espectral
+    ``||S^T S||_2``; devuelve ``sqrt(lo * hi) * ||S^T S||_2``.
+
+    El número de dipolos activos de la verdad es un hecho de diseño del
+    experimento (60), no el valor del campo: usarlo para fijar la
+    regularización no filtra nada de la información a predecir.
+    """
+    rng_i = np.random.default_rng(0)
+    idx = rng_i.choice(y.shape[0], size=min(240, y.shape[0]), replace=False)
+    yn = y[idx] / (np.std(y) + 1e-15)
+    l2 = power_norm_sq(s_f)
+    lo, hi = min_c, max_c
+    for _ in range(8):
+        c = np.sqrt(lo * hi)
+        x = fista_group_lasso(s_f, yn, c * l2, iters=coarse_iters)
+        supp = int((np.linalg.norm(x, axis=0) > 1e-6).sum())
+        if supp > target:
+            lo = c
+        else:
+            hi = c
+    return np.sqrt(lo * hi) * l2
+
+
+def sloreta_estimate(s_f: np.ndarray, alpha: float) -> np.ndarray:
+    """Inversa sLORETA: mínima norma Tikhonov + normalización por profundidad.
+
+    ``K = S^T (S S^T + alpha I)^{-1}`` estandarizado por la diagonal de la
+    matriz de resolución ``R = K S``: compensa el sesgo superficial de la
+    mínima norma (los dipolos profundos aparecen subestimados).
+    """
+    c, _ = s_f.shape
+    a = s_f @ s_f.T + alpha * np.eye(c)
+    k = s_f.T @ np.linalg.inv(a)
+    r = k @ s_f
+    rdiag = np.clip(np.diag(r), 1e-12, None)
+    return k / np.sqrt(rdiag)[:, None]
+
+
+def to_car(x: np.ndarray) -> np.ndarray:
+    """Re-referencia a la media instantánea del casco (343 canales, CAR)."""
+    return np.asarray(x) - np.asarray(x).mean(1, keepdims=True)
+
+
 # --- 1. montajes y grillas (marco canónico del asa, x derecha) -----------
 asa = np.load(ROOT / "data" / "processed" / "mne_asa_montages.npz")
 names_all = asa["names_asa05"].tolist()
@@ -354,12 +449,152 @@ for ord_l in ORDERS:
             row_d["r_ciega"] = m["r_mediana"]
             rows.append(row_d)
 
+# --- 3b. mejoras: techo Wiener, sLORETA y inversión group-sparse ----------
+# Las tres se comparan en las mismas unidades (VE por región) que la spline y
+# el lead field. El **techo Wiener** es la mejor reconstrucción LINEAL posible
+# (regresión medida→campo completo); las demás rutas se leen como fracción
+# de ese límite.
+
+WIENER_LAMBDA_FRAC = 0.10            # ridge relativa a trace(C_ss)/C_m
+SLORITA_ALPHA_FRAC = 1e-3            # alpha Tikhonov relativa a ||S^T S||_2
+ISTA_ITERS = 200
+ISTA_DSTEP = 5                       # decimación temporal del ajuste L2,1
+REFIT_RIDGE = 1e-3                   # ridge del refit LS del soporte
+
+for name, idx in montages.items():
+    p_src = pos_all_u[idx]
+    edges = lateral_edges(idx)
+    n_e = len(edges)
+    M_bip = np.zeros((len(idx), n_e))
+    for k, (a, b) in enumerate(edges):
+        M_bip[a, k] += 1.0
+        M_bip[b, k] -= 1.0
+    G_mont = G[idx]                                    # (C_m, N)
+    G_bip = M_bip.T @ G_mont                            # (C_e, N)
+    w_s = np.eye(len(idx)) - np.ones((len(idx), len(idx))) / len(idx)
+    s_m = w_s @ G_mont                                  # forward del monopolar centrado
+    ALPHA_SL_MONO = SLORITA_ALPHA_FRAC * power_norm_sq(s_m)
+    ALPHA_SL_BIP = SLORITA_ALPHA_FRAC * power_norm_sq(G_bip)
+    K_sl_mono = sloreta_estimate(s_m, ALPHA_SL_MONO)
+    K_sl_bip = sloreta_estimate(G_bip, ALPHA_SL_BIP)
+    l2_bip = power_norm_sq(G_bip)
+
+    for lat in TRUE:
+        V = TRUE[lat]
+        Vs = V[:, idx]
+        Vc = Vs - Vs.mean(1, keepdims=True)             # referencia promedio del montaje
+        Vb = Vs @ M_bip
+        t_train = np.arange(0, SCENES // 2 * SAMPLES)
+        t_test = np.arange(SCENES // 2 * SAMPLES, SCENES * SAMPLES)
+
+        # --- (1) techo Wiener/MMSE (split-half sobre escenas) ---
+        x_tr = Vs[t_train]
+        c_ss = x_tr.T @ x_tr / len(t_train)
+        c_sd = x_tr.T @ V[t_train] / len(t_train)
+        lam_w = WIENER_LAMBDA_FRAC * np.trace(c_ss) / len(idx)
+        h_wiener = np.linalg.solve(c_ss + lam_w * np.eye(len(idx)), c_sd)
+        rec_win = Vs[t_test] @ h_wiener
+        for rname, rec in [("wiener", rec_win)]:
+            row = {
+                "order": np.nan, "montaje": name, "lateralidad": lat,
+                "ruta": rname, "n_canal": len(idx), "n_edges": n_e,
+                "n_components": np.nan, "alpha": np.nan,
+                "lambda_": lam_w, "cal_gain": np.nan, "fisicidad": fisicidad(rec),
+            }
+            for region, rmask in [("medida", measured_region),
+                                  ("ciega", blind_region),
+                                  ("total", np.ones(len(pos_all), bool))]:
+                m = region_metrics(rec, V[t_test], rmask)
+                row[f"ve_{region}"] = m["ve"]
+                row[f"ve_patron_{region}"] = m["ve_patron"]
+                row[f"r_{region}"] = m["r_mediana"]
+                row[f"amp_{region}"] = m["amp_ratio"]
+            rows.append(row)
+            print(f"wiener     {name:<9s} lat={lat:<6s} "
+                  f"lam={lam_w:.2e} VE_medida={row['ve_medida']:+.3f} "
+                  f"VE_ciega={row['ve_ciega']:+.3f} (techo lineal)")
+
+        # --- (3) sLORETA: monopolar y bipolares (mínima norma estandarizada) ---
+        # La normalización por resolución corrige el sesgo de profundidad pero
+        # destruye la escala absoluta (~×20): se re-calibra la ganancia escalar
+        # que mejor reproduce lo medido (un solo grado de libertad, región
+        # medida) y se evalúa de nuevo el campo completo.
+        for rname, q, alpha_sl in [("slorita", Vc @ K_sl_mono.T, ALPHA_SL_MONO),
+                                   ("slorita_bip", Vb @ K_sl_bip.T, ALPHA_SL_BIP)]:
+            rec0 = to_car(q @ G.T)
+            cal_gain = ((V[:, measured_region] * rec0[:, measured_region]).sum()
+                        / (rec0[:, measured_region] ** 2).sum())
+            rec = cal_gain * rec0
+            row = {
+                "order": np.nan, "montaje": name, "lateralidad": lat,
+                "ruta": rname, "n_canal": len(idx), "n_edges": n_e,
+                "n_components": np.nan, "alpha": alpha_sl, "lambda_": np.nan,
+                "cal_gain": cal_gain, "fisicidad": fisicidad(rec),
+            }
+            for region, rmask in [("medida", measured_region),
+                                  ("ciega", blind_region),
+                                  ("total", np.ones(len(pos_all), bool))]:
+                m = region_metrics(rec, V, rmask)
+                row[f"ve_{region}"] = m["ve"]
+                row[f"ve_patron_{region}"] = m["ve_patron"]
+                row[f"r_{region}"] = m["r_mediana"]
+                row[f"amp_{region}"] = m["amp_ratio"]
+            rows.append(row)
+            print(f"{rname:12s} {name:<9s} lat={lat:<6s} "
+                  f"VE_medida={row['ve_medida']:+.3f} "
+                  f"VE_ciega={row['ve_ciega']:+.3f} r_ciega={row['r_ciega']:.3f}")
+
+        # --- (2) inversión group-sparse espacio-temporal (ISTA L2,1) ---
+        # pick_lambda devuelve λ absoluto (c × ||SᵀS||₂) buscando ~N_ACTIVE
+        # dipolos activos: la fracción c es la intensidad del soft-threshold
+        # relativa a la escala del forward.
+        lam_abs = pick_lambda(G_bip, Vb, N_ACTIVE)
+        rec_chunks = []
+        for sc in range(SCENES):
+            yb = Vb[sc * SAMPLES:(sc + 1) * SAMPLES]            # (640, C_e)
+            yn = yb[::ISTA_DSTEP] / (np.std(yb) + 1e-15)        # (m, C_e) normalizado
+            x = fista_group_lasso(G_bip, yn, lam_abs, iters=ISTA_ITERS)
+            supp = np.argwhere(np.linalg.norm(x, axis=0) > 1e-5).ravel()
+            if supp.size == 0:
+                rec_chunks.append(np.zeros((SAMPLES, len(pos_all))))
+                continue
+            g_j = G_bip[:, supp]                                 # (C_e, k)
+            # refit LS del soporte sobre TODA la escena (restaura amplitudes)
+            gj_T_gj = g_j.T @ g_j + REFIT_RIDGE * l2_bip * np.eye(supp.size)
+            x_j = yb @ g_j @ np.linalg.inv(gj_T_gj)              # (640, k)
+            abs_rec = x_j @ G[:, supp].T
+            rec_chunks.append(to_car(abs_rec))
+        rec_gl = np.vstack(rec_chunks)
+        for rname, rec in [("grouplasso", rec_gl)]:
+            row = {
+                "order": np.nan, "montaje": name, "lateralidad": lat,
+                "ruta": rname, "n_canal": len(idx), "n_edges": n_e,
+                "n_components": np.nan, "alpha": np.nan, "lambda_": lam_abs,
+                "cal_gain": np.nan, "fisicidad": fisicidad(rec),
+            }
+            for region, rmask in [("medida", measured_region),
+                                  ("ciega", blind_region),
+                                  ("total", np.ones(len(pos_all), bool))]:
+                m = region_metrics(rec, V, rmask)
+                row[f"ve_{region}"] = m["ve"]
+                row[f"ve_patron_{region}"] = m["ve_patron"]
+                row[f"r_{region}"] = m["r_mediana"]
+                row[f"amp_{region}"] = m["amp_ratio"]
+            rows.append(row)
+            print(f"grouplasso  {name:<9s} lat={lat:<6s} "
+                  f"lam={lam_abs:.3f} supp={int((np.linalg.norm(x, axis=0) > 1e-5).sum()):>3d}"
+                  f" VE_medida={row['ve_medida']:+.3f} "
+                  f"VE_ciega={row['ve_ciega']:+.3f} r_ciega={row['r_ciega']:.3f}")
+
 # --- 4. tablas ------------------------------------------------------------
 import pandas as pd
 
 df = pd.DataFrame(rows)
+for col in ("alpha", "lambda_"):
+    if col not in df.columns:
+        df[col] = np.nan
 for col in df.columns:
-    if col.startswith(("ve_", "r_", "amp_")):
+    if col.startswith(("ve_", "r_", "amp_", "lambda", "alpha", "cal_gain")):
         df[col] = pd.to_numeric(df[col], errors="coerce")
 df.to_csv(OUT / "metricas.csv", index=False)
 
@@ -374,6 +609,36 @@ s_lfb = s_lfb.set_index("montaje")
 s_lfb[["n_components", "ve_medida", "ve_ciega", "r_ciega", "fisicidad"]].round(3).to_csv(
     OUT / "resumen_leadfield_bip_mixto.csv")
 
+# --- comparativa por montaje (fuentes mixtas): métodos vs techo Wiener ----
+def mejor_por_montaje(ruta, lat="mixto"):
+    sub = df[(df.ruta == ruta) & (df.lateralidad == lat)]
+    idx = sub.groupby("montaje").ve_ciega.idxmax()
+    return sub.loc[idx].set_index("montaje")
+
+RUTAS_CMP = ["bipolar", "leadfield_bip", "slorita", "slorita_bip", "grouplasso"]
+b30 = df[(df.ruta == "bipolar") & (df.lateralidad == "mixto") & (df.order == 30)]
+b30 = b30.set_index("montaje")["ve_ciega"]
+filas_cmp = []
+for mont in montages:
+    d = {"montaje": mont}
+    win = mejor_por_montaje("wiener")
+    d["wiener"] = float(win.loc[mont, "ve_ciega"]) if mont in win.index else np.nan
+    d["bipolar"] = float(b30.loc[mont]) if mont in b30.index else np.nan
+    for ruta in ("leadfield_bip", "slorita", "slorita_bip", "grouplasso"):
+        best = mejor_por_montaje(ruta)
+        d[ruta] = float(best.loc[mont, "ve_ciega"]) if mont in best.index else np.nan
+    if d["wiener"] and abs(d["wiener"]) > 1e-9:
+        for ruta in ("bipolar", "leadfield_bip", "slorita", "slorita_bip",
+                     "grouplasso"):
+            d[f"{ruta}_frac_techo"] = d[ruta] / d["wiener"]
+    filas_cmp.append(d)
+resumen_cmp = pd.DataFrame(filas_cmp).set_index("montaje").round(3)
+resumen_cmp.to_csv(OUT / "resumen_comparativa_mixto.csv")
+
+print("\n--- Comparativa VE ciega (mixto): métodos vs techo Wiener ---")
+print(resumen_cmp.loc[:, ["wiener", "bipolar", "leadfield_bip", "slorita",
+                          "slorita_bip", "grouplasso"]].round(3))
+
 print("\n--- VE (hemisferio ciego) bipolar, fuentes mixtas ---")
 print(resumen.round(3))
 print("\n--- leadfield_bip (mejor n_components por montaje), fuentes mixtas ---")
@@ -387,10 +652,15 @@ summary = {
     "leadfield_bip_mixto": s_lfb[
         ["n_components", "ve_medida", "ve_ciega", "r_ciega", "fisicidad"]
     ].round(4).astype(object).to_dict(),
+    "techo_wiener_mixto": {
+        m: float(x) for m, x in resumen_cmp["wiener"].dropna().items()
+    },
+    "comparativa_mixto": resumen_cmp.astype(object).to_dict(),
     "fisicidad_media": {
         r: float(df[df.ruta == r]["fisicidad"].mean())
         for r in ("monopolar", "bipolar", "bipolar_directa",
-                  "leadfield", "leadfield_bip")
+                  "leadfield", "leadfield_bip",
+                  "wiener", "slorita", "slorita_bip", "grouplasso")
     },
 }
 # resumen compacto por tripleta clave (order=30) para el veredicto
@@ -560,14 +830,19 @@ plt.close(fig)
 
 # --- 5.6 VE medida vs VE ciega (fuentes mixtas) --------------------------
 # La mejora del lead field tiene que venir SIN degradar el hemisferio medido:
-# aquí se ve el frente de Pareto calidad-medida/extrapolación por ruta.
+# aquí se ve el frente de Pareto calidad-medida/extrapolación por ruta. Las
+# mejorar ("wiener", "slorita", "grouplasso") se plotean junto a las bases.
 sub56 = df[(df.lateralidad == "mixto") & df.ruta.isin(
-    ["monopolar", "bipolar", "leadfield", "leadfield_bip"])]
+    ["monopolar", "bipolar", "leadfield", "leadfield_bip",
+     "wiener", "slorita", "slorita_bip", "grouplasso"])]
 fig, ax = plt.subplots(figsize=(7.5, 5))
 for rname, mk, c in [("monopolar", "o", "#4C72B0"), ("bipolar", "s", "#DD8452"),
-                     ("leadfield", "^", "#55A868"), ("leadfield_bip", "D", "#C44E52")]:
+                     ("leadfield", "^", "#55A868"), ("leadfield_bip", "D", "#C44E52"),
+                     ("wiener", "*", "#111111"), ("slorita", "P", "#8172B3"),
+                     ("slorita_bip", "X", "#CCB974"), ("grouplasso", "v", "#55A868")]:
     s = sub56[sub56.ruta == rname]
-    ax.scatter(s.ve_medida, s.ve_ciega, marker=mk, c=c, label=rname, alpha=0.8)
+    ax.scatter(s.ve_medida, s.ve_ciega, marker=mk, c=c, label=rname, alpha=0.8,
+               s=(160 if rname == "wiener" else 44))
 ax.axhline(0, color="gray", lw=0.8)
 ax.set_xlabel("VE hemisferio medido")
 ax.set_ylabel("VE hemisferio ciego")
@@ -593,6 +868,43 @@ ax.set_ylabel("VE hemisferio ciego")
 ax.set_title("Extrapolación bipolar por lead field: efecto del truncado (mixto)")
 ax.legend(); ax.grid(alpha=0.3)
 fig.tight_layout(); fig.savefig(FIG / "07_leadfield_bip_por_components.png", dpi=130)
+plt.close(fig)
+
+# --- 5.8 Comparativa: VE ciega por método y % del techo Wiener (mixto) ----
+# El techo Wiener es la mejor reconstrucción lineal (regresión medida→campo):
+# las barras muestran qué fracción de ese límite alcanza cada ruta.
+cmp_plot = resumen_cmp.copy()
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+colores = {"wiener": "#333333", "bipolar": "#DD8452",
+           "leadfield_bip": "#C44E52", "slorita": "#8172B3",
+           "slorita_bip": "#CCB974", "grouplasso": "#55A868"}
+metodos = ["bipolar", "leadfield_bip", "slorita", "slorita_bip", "grouplasso"]
+x = np.arange(len(cmp_plot.index))
+ax = axes[0]
+for ruta in metodos:
+    ax.bar(x - 0.2 + 0.08 * metodos.index(ruta), cmp_plot[ruta],
+           width=0.075, color=colores[ruta], label=ruta)
+ax.plot(x, cmp_plot["wiener"], "k*", ms=15, label="wiener (techo)")
+ax.axhline(0, color="gray", lw=0.8)
+ax.set_xticks(x, cmp_plot.index)
+ax.set_ylabel("VE hemisferio ciego (mixto)")
+ax.set_title("VE ciega por método — techo Wiener en asterisco")
+ax.legend(fontsize=7); ax.grid(axis="y", alpha=0.3)
+ax = axes[1]
+width = 0.18
+for i, ruta in enumerate(metodos):
+    if f"{ruta}_frac_techo" in cmp_plot:
+        ax.bar(x + (i - (len(metodos) - 1) / 2) * width, cmp_plot[f"{ruta}_frac_techo"],
+               width=width, color=colores[ruta], label=ruta)
+ax.axhline(1.0, color="k", ls=":", lw=1)
+ax.axhline(0, color="gray", lw=0.8)
+ax.set_xticks(x, cmp_plot.index)
+ax.set_ylabel("VE ciega / techo Wiener")
+ax.set_ylim(0, 1.05)
+ax.set_title("Fracción del techo alcanzada (1 = límite teórico)")
+ax.legend(fontsize=7); ax.grid(axis="y", alpha=0.3)
+fig.suptitle("Mejoras sobre la extrapolación: Wiener, sLORETA y group-sparse (ISTA)")
+fig.tight_layout(); fig.savefig(FIG / "08_comparativa_techo_wienerslorita_grouplasso.png", dpi=130)
 plt.close(fig)
 
 print("\ndone ->", OUT)

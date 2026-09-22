@@ -19,7 +19,7 @@ pregunta de la exploración `topomap_refs`:
   lateralizado.
 * **Bipolares**: diferencias a lo largo de las aristas Delaunay locales
   (solo dentro del hemisferio medido).
-* **Reconstrucción**, dos familias:
+* **Reconstrucción**, en dos familias + tres mejoras:
   * **Geométrica** (spline esférica, `mapping.py`):
     * `monopolar` (control): interpolar el potencial medido directamente.
     * `bipolar`: integrar las diferencias (`pinv` + centrado) y luego spline.
@@ -29,11 +29,25 @@ pregunta de la exploración `topomap_refs`:
     * `leadfield_bip` (diferencias): ajuste de dipolos a los bipolares
       `G_bip = MᵀG_s` (truncado a `n_components`) y campo de casco generado
       por esos dipolos: `V_rec = V_bip @ (U_k s_k⁻¹ Vᵏ Gᵀ)`.
+  * **Mejoras** (bloque 3b, mismas unidades de medida):
+    * `wiener` — **techo lineal**/MMSE: regresión ridge from lo medido al
+      campo completo (split-half por escenas). Es la cota superior que ninguna
+      reconstrucción *lineal* basada en lo medido puede superar.
+    * `slorita` / `slorita_bip` — inversión **sLORETA** (mínima norma
+      Tikhonov estandarizada por la diagonal de la resolución) desde monopolar
+      centrado / bipolares, re-calibrada con la ganancia escalar que mejor
+      reproduce lo medido (la estandarización de sLORETA rompe la escala
+      absoluta ~×20; un solo grado de libertad en la región medida).
+    * `grouplasso` — **inversión group-sparse espacio-temporal** (FISTA L2,1
+      por soporte de dipolos compartido en la escena + refit LS del soporte);
+      λ elegido por búsqueda binaria con ~`N_ACTIVE` dipolos activos.
 * **Métricas por región** (medida = izquierda+midline, ciego = derecha): VE,
   VE del patrón espacial (sin offset instantáneo), `r` mediana, ratio de
   amplitud RMS y **fisicidad**.
 
 ## Resultado central (fuentes mixtas)
+
+Tabla base (spline vs lead field; VE ciego):
 
 | montaje | ruta | VE medida | VE ciego | r ciega | amp ciega |
 |---|---|---|---|---|---|
@@ -43,6 +57,14 @@ pregunta de la exploración `topomap_refs`:
 | asa10-10 | leadfield_bip (k=9) | 0.84 | **+0.48** | 0.72 | 1.4× |
 | dense (165) | spline bipolar | 0.77 | **−3.14** | 0.74 | 2.3× |
 | dense | leadfield_bip (k=82) | 0.91 | **+0.65** | 0.87 | 1.3× |
+
+Mejoras (VE ciega, fuentes mixtas, `resumen_comparativa_mixto.csv`):
+
+| montaje | wiener (techo) | slorita | slorita_bip | leadfield_bip | grouplasso |
+|---|---|---|---|---|---|
+| asa10-20 | **0.70** | 0.56 | 0.55 | 0.55 | 0.11 |
+| asa10-10 | **0.67** | 0.55 | 0.54 | 0.48 | 0.20 |
+| dense | **0.77** | 0.62 | 0.63 | 0.65 | 0.14 |
 
 Incluye el resto de lateralidades y todos los `n_components` en
 `metricas.csv`. Las rutas `leadfield` (monopolar) emparejan o superan a
@@ -69,6 +91,30 @@ Incluye el resto de lateralidades y todos los `n_components` en
    da el mejor balance fidelidad/ruido (figura `07_*`). Con el montaje
    completo (dense) el hemisferio ciego se recupera con VE ~0.65 y `r`~0.87.
 
+### Qué aportan las mejoras (bloque 3b)
+
+1. **El techo Wiener cuantifica el margen de mejora**: con lo medido como
+   regresor directo (sin pasar por el forward) se llega a VE ciega
+   ~0.67–0.77 según el montaje. Ninguna ruta lineal puede superarlo; las rutas
+   basadas en el forward operan al **~72–85% de esa cota** (fracciones en
+   `comparativa_mixto` del JSON), por lo que el gap restante no es
+   regularización mal elegida sino la información que el conductor de volumen
+   no puede transformar en ciegos desde un hemisferio lateral.
+
+2. **sLORETA es la ruta base más cerca del techo**: la mínima norma
+   estandarizada empata o supera al `leadfield_bip` truncado en montajes
+   escasos (10-20: 0.56 vs 0.55; 10-10: 0.55 vs 0.48) y queda a la par en el
+   dense; además conserva la fisicidad plena (está en `col(G)` por
+   construcción). El monopolar centrado va ligeramente por delante del bipolar
+   (`slorita` ≥ `slorita_bip`).
+
+3. **El group-sparse espacio-temporal NO mejora al lead field**: el soporte
+   de dipolos se recupera (10–20 activos), pero la VE ciega (0.11–0.20) queda
+   por debajo del truncado SVD: al ser el ruido de sensores pequeño (1%), el
+   parsimonia L2,1 no añade robustez y el refit LS del soporte pierde
+   precisión frente a usar todos los modos estables del SVD. Se reporta como
+   resultado honesto: la regularización de parsimonia no ayuda aquí.
+
 ### Qué NO dice la fisicidad (hallazgo honesto)
 
 La métrica `fisicidad = 1 − ‖V_rec − G(G⁺V_recᵀ)ᵀ‖²/‖V_rec‖²` mide qué
@@ -94,10 +140,14 @@ forward.
 
 * `run.py` — experimento (siembra, escenas, reconstrucción, métricas, figuras).
 * `runs/exp_extrapolacion_hemisferio/metricas.csv` — tabla completa
-  (order × montaje × lateralidad × ruta × n_components).
-* `runs/exp_extrapolacion_hemisferio/metricas.json` — resumen compacto.
+  (order × montaje × lateralidad × ruta × n_components) + `lambda_`/`alpha`/
+  `cal_gain` de las mejoras.
+* `runs/exp_extrapolacion_hemisferio/metricas.json` — resumen compacto
+  (incluye `techo_wiener_mixto`, `comparativa_mixto` con fracciones del techo).
 * `runs/exp_extrapolacion_hemisferio/resumen_leadfield_bip_mixto.csv` — mejor
   `n_components` por montaje (leadfield_bip, fuentes mixtas).
+* `runs/exp_extrapolacion_hemisferio/resumen_comparativa_mixto.csv` — VE ciego
+  por método y % del techo Wiener por montaje.
 * `runs/exp_extrapolacion_hemisferio/figs/` — figuras (panorama spline,
   comparativa spline-vs-leadfield, VE medida vs ciega, efecto n_components,
-  VE por orden/lateralidad/distancia).
+  VE por orden/lateralidad/distancia, comparativa con el techo Wiener).
