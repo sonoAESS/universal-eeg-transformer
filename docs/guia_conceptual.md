@@ -333,7 +333,6 @@ split.
 - `docs/mapping_wip.md` — unificación de montajes (métodos y CLI).
 - `docs/model_variants.md` — detalle de arquitecturas y física de grupo.
 - `docs/results_comparison.md` — resultados comparativos por variante.
-- `state_of_art.md` — revisión de literatura (REST, EEG-GAN, etc.).
 - `src/eeg_transform/references.py` — matrices de referencia (unipolar,
   bipolar, CAR, REST).
 - `src/eeg_transform/leadfield.py` — lead field multicapa y REST.

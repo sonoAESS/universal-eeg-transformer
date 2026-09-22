@@ -72,7 +72,7 @@ eeg-transform -c config/smoke.yaml build        # descarga PhysioNet eegbci y ca
 eeg-transform -c config/smoke.yaml train        # entrena el transformador lineal
 eeg-transform -c config/smoke.yaml eval         # métricas de test y figuras
 eeg-transform -c config/*.yaml pipeline         # build + train + eval
-eeg-transform compare runs/projected runs/soft_group runs/wide   # tabla comparativa de ejecuciones
+eeg-transform compare runs/multi_montage runs/multi_heatmap runs/universal_refs   # tabla comparativa de ejecuciones
 ```
 
 ## Notebooks por variante
@@ -86,16 +86,12 @@ pon `FORCE = True` solo para reentrenar desde cero.
 
 | Notebook | Configuración | Variante |
 |---|---|---|
-| `notebooks/free.ipynb` | `config/default.yaml` | autoencoder libre |
-| `notebooks/group.ipynb` | `config/group.yaml` | estructura de grupo exacta |
-| `notebooks/projected.ipynb` | `config/projected.yaml` | anulación del modo constante |
-| `notebooks/soft_group.ipynb` | `config/soft_group.yaml` | grupo suave por regularización |
-| `notebooks/wide.ipynb` | `config/wide.yaml` | free con latente 128 |
-| `notebooks/bottleneck.ipynb` | `config/bottleneck.yaml` | free con latente 32 |
 | `notebooks/montage_leadfield.ipynb` | `config/montage_leadfield.yaml` | unificación por solución inversa (lead field) |
 | `notebooks/montage_heatmap.ipynb` | `config/montage_heatmap.yaml` | unificación por mapas de calor (spline) |
 | `notebooks/multi_montage.ipynb` | `config/multi_montage.yaml` | entrenamiento conjunto y balanceado sobre 19/64/128/256 electrodos |
 | `notebooks/multi_heatmap.ipynb` | `config/multi_heatmap.yaml` | igual + campo de superficie (el topomapa es una salida entrenada) |
+| `notebooks/multi_heatmap_v2.ipynb` | `config/multi_heatmap_v2.yaml` | igual + campo aprendible y consistencia física cruzada |
+| `notebooks/universal_refs.ipynb` | `config/universal_refs.yaml` | igual + cabeza temporal de residuo (conv/gru/lstm/rnn) |
 
 Los notebooks de montaje estiman las 4 referencias canónicas (64 canales) desde
 **cualquier configuración de electrodos** (p. ej. 10-20, 19 canales) y muestran
