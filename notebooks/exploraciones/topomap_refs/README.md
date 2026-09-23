@@ -1,7 +1,8 @@
 # `topomap_refs` — enfoque topomapa / grilla universal
 
 Exploración de la rama `explore/topomap-refs`: **solo notebooks** (manejados a
-mano, NO se regeneran desde `generate_notebooks.py`). Usa datos reales cacheados
+mano, NO se regeneran desde `generate_notebooks.py`). Viven en
+`notebooks/exploraciones/topomap_refs/`. Usan datos reales cacheados
 (eegbci 64ch canónico, `standard_1005`, sujetos 1-2, 7 referencias) sin
 descargas y sin Drive.
 

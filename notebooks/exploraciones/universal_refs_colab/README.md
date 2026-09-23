@@ -1,4 +1,7 @@
-# Exploración `universal_refs` (rama `explore/multi-heatmap`)
+# Exploración `universal_refs` (notebooks de Colab)
+
+> Originada en la rama `explore/multi-heatmap` (agrupación `universal_refs_colab`);
+> notebooks manejados a mano, NO se regeneran desde `generate_notebooks.py`.
 
 Modelo que convierte entre **7 referencias** — unipolar/Cz, linked
 mastoides, linked lóbulos, bipolar (vecinos físicos), CAR, REST y
@@ -23,7 +26,8 @@ dependencias.
 * Cascos activos por defecto: `"10-20", "10-10", "canonical"`; para añadir
   una base externa real: censo con `tools/openneuro_census.py` → descarga
   BIDS → `data.external.build_external_dataset(...)` → añadir
-  `"external:<etiqueta>"` a `mapping.configs`.
+  `"external:<etiqueta>"` a `mapping.configs`. (El `tools/openneuro_census.py`
+  vive en la rama `explore/multi-heatmap`; este repo no lo incluye.)
 * `model.temporal_window = 0` desactiva la cabeza dinámica (modelo
   puramente instantáneo = ablation exacta).
 * Reutiliza `runs/universal_refs/best.weights.h5` si existe;
