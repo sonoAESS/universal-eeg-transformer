@@ -1,5 +1,11 @@
 # Variantes de modelo del Universal EEG Transformer
 
+> **HISTÓRICO.** Este documento describe variantes/fases que ya **no forman
+> parte del código** (estas ramas de exploración se cerraron y el núcleo
+> canónico se simplificó a la variante `free`). Se conserva como referencia
+> conceptual; el estado vigente está en `README.md`,
+> `docs/guia_conceptual.md` y `docs/results_comparison.md`.
+
 El transformador es un autoencoder **lineal** multientrada/multisalida:
 cada ruta efectiva es la matriz `A_{s→d} = W_enc^s @ W_dec^d` (C×C), actuando
 `X_ref = X @ A` sobre señales `(tiempo, canales)`. El espacio latente tiene

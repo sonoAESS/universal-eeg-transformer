@@ -10,6 +10,12 @@ Reproducción: `eeg-transform -c config/<variante>.yaml pipeline` y luego
 
 ## Tabla comparativa (test)
 
+> **Nota (refactor 2026-09):** la tabla siguiente compara la **familia canónica
+> histórica** (`projected`/`soft_group`/`group`/`wide`/`bottleneck`), que se
+> retiró del código (el núcleo canónico se simplificó a `free`). Se conserva
+> como referencia; las variantes vigentes (`free`, `montage_*`, `multi_*`,
+> `universal_refs`) se cubren en las secciones de abajo y en el README.
+
 Métricas promedio de test. `rmse` en microvoltios; `r` = correlación de
 Pearson media entre canales; `comp_medio`/`comp_max` = error relativo de
 composición `||P(A_{s→d}A_{d→u} − A_{s→u})P||F / ||P A_{s→u} P||F`

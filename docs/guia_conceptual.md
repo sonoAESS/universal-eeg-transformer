@@ -140,10 +140,7 @@ igual en la retropropagación. También se registran métricas en unidades reale
 ### Variantes
 | Variante | Qué hace | Cuándo usarla |
 |---|---|---|
-| `free` | 8 matrices aprendidas sin restricciones. | Línea base de máxima flexibilidad. |
-| `projected` | Cada matriz se parametriza como `P W` con `P = I − 11ᵀ/C`: por construcción toda salida anula el modo constante. | Precisión en rutas individuales. |
-| `group` | `W_dec = (W_enc)⁺` (pseudo-inversa): produce composición **exacta** (`A_{s→d}A_{d→u}=A_{s→u}`) y auto-reconstrucción. | Cuando importa la física de grupo. |
-| `soft_group` | Igual que `free` pero con penalización suave de composición en la pérdida. | Compromiso precisión/física. |
+| `free` | 8 matrices aprendidas sin restricciones. | Línea base de máxima flexibilidad (canónica vigente). |
 | `montage_*` | Un montaje fuente de `C_s` electrodos entra por una **proyección fija** `P` y el modelo predice las referencias canónicas (64). | Unificar un montaje concreto al espacio canónico. |
 | `multi_montage` | Entrena **varias configuraciones a la vez** (19/64/128/256) con el mismo autoencoder; cada una se embebe con `P_s` y se lee con `Q_s`, y el modelo predice referencias **en la propia configuración**. | Un modelo universal para cualquier configuración de electrodos. |
 | `multi_heatmap` | Igual que `multi_montage` + **campo de superficie**: además del MSE por electrodo, la actividad se lee y se entrena como *heatmap* sobre una **malla compartida** del cuero cabelludo (la de los topomapas). | Un modelo universal cuyo topomapa también es fiel, no solo los electrodos. |
@@ -272,7 +269,7 @@ veces menor que el RMSE cuando los errores son gaussianos.
 r = correlación(ŷ_c, y_c) por canal c, luego media
 ```
 - Mide **forma/sincronía**, no magnitud.
-- Referencia: r > 0.99 en `projected` (canónico) ≈ **excelente**; 0.95–0.99
+- Referencia: r > 0.99 en `free` (canónico) ≈ **excelente**; 0.95–0.99
   **muy bueno**; 0.90–0.95 **aceptable**; < 0.90 en rutas cruzadas indica que
   la tarea no está bien resuelta. En problemas de referencia, un r > 0.99 es
   típico y esperable porque la tarea es lineal casi exacta.

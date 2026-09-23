@@ -1,5 +1,11 @@
 # Experimentos: más datos y variantes con propiedades físicas
 
+> **HISTÓRICO.** Este documento describe variantes/fases que ya **no forman
+> parte del código** (estas ramas de exploración se cerraron y el núcleo
+> canónico se simplificó a la variante `free`). Se conserva como referencia
+> conceptual; el estado vigente está en `README.md`,
+> `docs/guia_conceptual.md` y `docs/results_comparison.md`.
+
 Métricas de **test** sobre sujetos 1–12 de `eegbci` (baseline `runs [1,2]`,
 64 canales @160 Hz, split temporal por bloques). API `eeg_transform` v4
 (montaje + variantes), pérdida Z-score por lote.

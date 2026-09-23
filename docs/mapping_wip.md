@@ -1,5 +1,11 @@
 # Estado del proyecto — WIP unificación de montajes
 
+> **HISTÓRICO.** Este documento describe variantes/fases que ya **no forman
+> parte del código** (estas ramas de exploración se cerraron y el núcleo
+> canónico se simplificó a la variante `free`). Se conserva como referencia
+> conceptual; el estado vigente está en `README.md`,
+> `docs/guia_conceptual.md` y `docs/results_comparison.md`.
+
 **Fecha:** 2026-08-18 · **Rama:** `main`. Basado en `docs/results_comparison.md`.
 
 ## Lo completado (commiteado)

@@ -29,6 +29,7 @@ uv sync                                            # recrear entorno si hace fal
 PYTHONPATH=src entorno/bin/python -m pytest tests/ -q     # tests (rápido, sin GPU)
 PYTHONPATH=src entorno/bin/python -m eeg_transform.cli --help
 eeg-transform -c config/smoke.yaml pipeline        # build + train + eval
+eeg-transform experiment-extrapolacion             # experimento sintético (sin dataset/config)
 PYTHONPATH=src entorno/bin/python notebooks/generate_notebooks.py   # regenerar notebooks
 ```
 
@@ -58,14 +59,17 @@ src/eeg_transform/
   references.py                # operadores uni/bip/CAR/REST (+ rest_rcond)
   leadfield.py                 # esfera 4 capas analítica (MNE)
   mapping.py                   # proyección spline/leadfield entre montajes, malla
-  experiments/{montage,multi}.py  # observaciones por montaje y multi-config balanceada
+  experiments/{montage,multi,hemisphere}.py  # observaciones por montaje, multi-config
+                               #   balanceada y experimento sintético de extrapolación
   models/{universal_transformer,multi_montage,multi_heatmap}.py
   training/trainer.py          # bucles TF + build_multiconfig_model
   evaluation/{metrics,plots}.py
   nb.py                        # helpers compartidos de los notebooks (load_experiment,
                                #   train_variant, evaluate_*, plot_*)
-tests/test_*.py                # physics, config_ds, montage, multi, integration
+  cli.py                       # build/train/eval/compare/pipeline/montage/experiment-extrapolacion
+tests/test_*.py                # physics, config_ds, montage, multi, temporal, integration
 notebooks/generate_notebooks.py + *.ipynb   # notebooks autogenerados (no editar a mano)
+notebooks/exploraciones/       # topomap_refs/ y universal_refs_colab/ (editados a mano)
 runs/<variante>/               # checkpoints, history.csv, métricas, figuras
 ```
 
@@ -73,7 +77,9 @@ runs/<variante>/               # checkpoints, history.csv, métricas, figuras
 
 Se generan desde `notebooks/generate_notebooks.py` (nbformat): editar ahí la
 lógica/regenerar, nunca el `.ipynb` directamente. Cada notebook reutiliza el
-checkpoint de `runs/` salvo `FORCE = True`.
+checkpoint de `runs/` salvo `FORCE = True`. Excepción: las exploraciones de
+`notebooks/exploraciones/` (topomap_refs, universal_refs_colab) se editan a mano
+y NO se regeneran.
 
 ## Rama actual: `explore/topomap-refs` (conceptual topomap + recurrencia)
 
@@ -102,10 +108,11 @@ distribución** (una 10-10 real → la 10-20, o desde otra distribución) y
   descargas y sin Drive.
 
 * **Solo notebooks**: NO se toca `src/`, NO hay scripts ni tests nuevos.
-  Estructura: `topomap_refs/` (`01_topomapas_y_montajes.ipynb`,
+  Estructura: `notebooks/exploraciones/topomap_refs/`
+  (`01_topomapas_y_montajes.ipynb`,
   `02_referencia_average_all.ipynb`, `03_modelo_montaje_referencia.ipynb`,
   `README.md`) — se editan a mano, NO se regeneran desde
-  `generate_notebooks.py` (igual que `multi_heatmap/`).
+  `generate_notebooks.py` (igual que `universal_refs_colab/`).
 * Las referencias/montajes nuevos se definen DENTRO de los notebooks usando
   funciones existentes del paquete (`scalp_grid_matrix`, `linked_matrix`,
   `build_reference_matrix`, `inter_reference_matrix`, `spherical_spline_matrix`)
@@ -143,7 +150,8 @@ Puntos importantes:
 * Las cabezas se inicializan a cero: el arranque es idéntico al modelo
   lineal (ablation trivial) para cualquier `temporal_cell`.
 * Variante de ejecución: `config/universal_refs_gru.yaml`
-  (`temporal_cell: gru`, `runs/universal_refs_gru`).
+  (`temporal_cell: gru`, salidas en `runs/universal_refs_gru` — no está en esta
+  máquina). Barrido comparativo de cabezas en `config/universal_refs_cmp_*.yaml`.
 * Tests: `tests/test_temporal.py` (parametrizado por célula + evaluador
   ventaneado). Prefijo de commit de este bloque: `feat(universal_refs): ...`.
 
