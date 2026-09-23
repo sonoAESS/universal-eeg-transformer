@@ -297,6 +297,37 @@ def cmd_extrapolacion(cfg=None) -> None:
     run_cmd()
 
 
+def cmd_topomap_video(args) -> None:
+    """Vídeo-topomapa: entrada observada → estimaciones por método (por ventana)."""
+    from .evaluation.topomap_video import (
+        INPUT_CONFIGS,
+        VIDEO_MODELS,
+        run_topomap_video,
+    )
+
+    models = [m.strip() for m in args.models.split(",")] if args.models else []
+    for m in models:
+        if m not in VIDEO_MODELS:
+            raise ValueError(f"Método desconocido '{m}' (válidos: "
+                             f"{sorted(VIDEO_MODELS)}).")
+    if args.input not in INPUT_CONFIGS:
+        raise ValueError(f"Entrada no soportada: '{args.input}' "
+                         f"(válidas: {INPUT_CONFIGS}).")
+    formats: tuple[str, ...] = tuple(
+        f.strip() for f in args.format.split(",") if f.strip())
+    out = run_topomap_video(
+        models=models, cfg_label=args.input, source=args.source,
+        duration_s=args.duration_s, window=args.window,
+        start=args.start, sfreq=args.sfreq, grid_px=args.grid_px,
+        fps=args.fps, formats=formats,
+        out_dir=args.out_dir,
+        force_train=args.force_train,
+    )
+    for fmt, path in out["figuras"].items():
+        print(f"[{fmt}] {path}")
+    print(f"[metrics] {out['metrics']}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="eeg-transform",
@@ -333,6 +364,42 @@ def main(argv: list[str] | None = None) -> int:
              "hemisferio ciego (no usa el dataset real).",
     )
 
+    p_vid = sub.add_parser(
+        "topomap-video",
+        help="Vídeo-topomapa comparativo: entrada observada en una ventana "
+             "temporal → topomapas de las referencias estimadas por método "
+             "(modelos + línea base analítica) con métricas por ventana.",
+    )
+    p_vid.add_argument(
+        "--models", default=None,
+        help="Métodos modelo, separados por coma (free, multi_montage, "
+             "multi_heatmap_v2, universal_refs_conv, universal_refs_gru). "
+             "La línea base analítica siempre se incluye.",
+    )
+    p_vid.add_argument("--input", default="canonical",
+                       choices=("canonical", "10-20"),
+                       help="Configuración de electrodos observada.")
+    p_vid.add_argument("--source", default="unipolar",
+                       help="Referencia observada como entrada del topomapa.")
+    p_vid.add_argument("--duration-s", type=float, default=10.0,
+                       help="Duración del segmento en segundos.")
+    p_vid.add_argument("--window", type=int, default=64,
+                       help="Ventana causal (muestras) para las métricas.")
+    p_vid.add_argument("--start", type=int, default=0,
+                       help="Índice de inicio del segmento dentro del split.")
+    p_vid.add_argument("--sfreq", type=float, default=160.0,
+                       help="Frecuencia de muestreo (Hz) para el eje temporal.")
+    p_vid.add_argument("--grid-px", type=int, default=64,
+                       help="Resolución de la malla del topomapa.")
+    p_vid.add_argument("--fps", type=int, default=15,
+                       help="Fotogramas por segundo del vídeo.")
+    p_vid.add_argument("--format", default="gif",
+                       help="Formatos, separados por coma (gif, mp4).")
+    p_vid.add_argument("--out-dir", default="runs/topomap_video/figs",
+                       help="Directorio de salida.")
+    p_vid.add_argument("--force-train", action="store_true",
+                       help="Reentrena los modelos aunque haya checkpoints.")
+
     args = parser.parse_args(argv)
 
     cfg = load_config(args.config)
@@ -356,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd_montage(cfg, montages)
     elif args.command == "experiment-extrapolacion":
         cmd_extrapolacion(cfg)
+    elif args.command == "topomap-video":
+        cmd_topomap_video(args)
     return 0
 
 
