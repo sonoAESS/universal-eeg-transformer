@@ -63,11 +63,14 @@ src/eeg_transform/
                                #   balanceada y experimento sintético de extrapolación
   models/{universal_transformer,multi_montage,multi_heatmap}.py
   training/trainer.py          # bucles TF + build_multiconfig_model
-  evaluation/{metrics,plots}.py
+  evaluation/{metrics,plots,topomap_video}.py  # métricas, renders y vídeo-topomapa
   nb.py                        # helpers compartidos de los notebooks (load_experiment,
                                #   train_variant, evaluate_*, plot_*)
-  cli.py                       # build/train/eval/compare/pipeline/montage/experiment-extrapolacion
-tests/test_*.py                # physics, config_ds, montage, multi, temporal, integration
+  cli.py                       # build/train/eval/compare/pipeline/montage/
+                               #   experiment-extrapolacion/topomap-video
+config/topomap_video_*.yaml    # (re)entrenamiento de la familia para el vídeo-topomapa
+tests/test_*.py                # physics, config_ds, montage, multi, temporal,
+                               #   topomap_video, integration
 notebooks/generate_notebooks.py + *.ipynb   # notebooks autogenerados (no editar a mano)
 notebooks/exploraciones/       # topomap_refs/ y universal_refs_colab/ (editados a mano)
 runs/<variante>/               # checkpoints, history.csv, métricas, figuras
@@ -81,9 +84,10 @@ checkpoint de `runs/` salvo `FORCE = True`. Excepción: las exploraciones de
 `notebooks/exploraciones/` (topomap_refs, universal_refs_colab) se editan a mano
 y NO se regeneran.
 
-## Rama actual: `explore/topomap-refs` (conceptual topomap + recurrencia)
+## Rama actual: trabajos de topomapa / recurrencia (fusionados en `main`)
 
-Esta rama aloja dos trabajos:
+`explore/topomap-refs` se fusionó en `main` (`413d843`, con push a origin). Desde
+esa base se construyó en `main` el bloque `feat(topomap_video)`. La rama aloja:
 
 ### 1. Topomapa / grilla universal (prueba conceptual, SOLO notebooks)
 
@@ -154,6 +158,33 @@ Puntos importantes:
   máquina). Barrido comparativo de cabezas en `config/universal_refs_cmp_*.yaml`.
 * Tests: `tests/test_temporal.py` (parametrizado por célula + evaluador
   ventaneado). Prefijo de commit de este bloque: `feat(universal_refs): ...`.
+
+### 3. Vídeo-topomapa comparativo (código en `src/`, en `main`)
+
+Bloque `feat(topomap_video)`: animación (GIF/MP4) que muestra, por ventana
+temporal, el topomapa de la **referencia observada** y los de las **7 referencias
+estimadas** por cada método, con métricas de cada ruta en la ventana causal
+`[t-window+1, t]`. Todo vive en `src/eeg_transform/evaluation/topomap_video.py`
+(registro `VIDEO_MODELS`, `SegmentData`, `predict_method`, `topomap_video_fig`,
+`save_topomap_video`, `run_topomap_video`) y se lanza con
+`eeg-transform topomap-video`.
+
+* Métodos: línea base analítica `T_d·pinv(T_s)` (`inter_reference_matrix`)
+  + modelos `free`, `multi_montage`, `multi_heatmap_v2`, `universal_refs_conv/gru`
+  ((re)entrenados con `config/topomap_video_*.yaml`, sujetos 1-2, en
+  `runs/topomap_video/<nombre>/`). `free` y `universal_refs` solo soportan la
+  entrada `canonical` (64 ch); los `multi_*` también `10-20` (19 ch).
+* Alineación: todas las predicciones quedan **alineadas a muestras** del
+  segmento; los temporales (`_predict_causal`, `stride=1`) marcan `NaN` los
+  instantes `< window-1`. Los marcos arrancan en `2·(window-1)` para que cada
+  ventana causal tenga exactamente `window` muestras con predicción. Los
+  `sliding_window_view` añaden la ventana como eje trailing → transponer a
+  `(n_w, window, C)`.
+* Salidas en `runs/topomap_video/figs/`: `topomap_video_{input}_{source}.{gif,mp4}`
+  + `*_metrics.csv` (marco, instante_s, ruta, rmse_uV, r, ve, método).
+* Tests: `tests/test_topomap_video.py` (alineación, métricas, figura — datos
+  sintéticos, sin entrenamiento ni descargas). Prefijo de commit
+  `feat(topomap_video): ...`.
 
 ## Trabajo con ramas y commits
 

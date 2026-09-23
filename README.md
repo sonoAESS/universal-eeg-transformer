@@ -1,11 +1,17 @@
 # Universal EEG Transformer
 
 Autoencoder **lineal** multicabezal *All-to-All* que unifica la conversión entre
-cuatro referencias de EEG — `unipolar`, `bipolar`, `CAR` y `REST` — a través de
-un espacio latente central de dimensión `C`. Al ser puramente lineal, el mapeo
-efectivo de cada ruta es la matriz `A_{s→d} = W^enc_s W^dec_d` (C×C), lo que
-respeta la estructura algebraica de los campos electrostáticos del cuero
-cabelludo.
+referencias de EEG — `unipolar`, `linked_mastoids`, `linked_ears`, `bipolar`,
+`CAR`, `REST` y `laplacian` — a través de un espacio latente central de dimensión
+`C`. Al ser puramente lineal, el mapeo efectivo de cada ruta es la matriz
+`A_{s→d} = W^enc_s W^dec_d` (C×C), lo que respeta la estructura algebraica de los
+campos electrostáticos del cuero cabelludo.
+
+La investigación persigue **llevar cualquier distribución de electrodos y
+cualquier referencia a cualquier otra** con un único modelo: dado lo observado en
+una configuración (p. ej. 10-20) bajo una referencia, reconstruir las demás
+referencias en esa misma configuración (y, en las variantes de montaje, en
+configuraciones distintas).
 
 Sobre ese núcleo existen tres familias:
 
@@ -28,7 +34,9 @@ Sobre ese núcleo existen tres familias:
 * **`unipolar`:** resta del canal de referencia (`Cz`). **`bipolar`:** resta del
   canal siguiente (cadena, rango C−1). **`CAR`:** resta de la media de todos los
   canales. **`REST`:** paso a una referencia al infinito virtual, calculada con
-  el *lead field* analítico.
+  el *lead field* analítico. **`linked_mastoids`/`linked_ears`:** resta del
+  promedio de los canales de las dos mastoides/orejas. **`laplacian`:** referencia
+  aproximada con el Laplaciano esférico (derivada radial, vía ``mapping``).
 * **Referencia del dato original:** `eegbci` graba contra la mastoides izquierda
   (`data.original_reference`). Se revisa y audita en el pipeline, pero los cuatro
   montajes son invariantes a ella: todos eliminan el offset constante instantáneo
@@ -82,6 +90,7 @@ eeg-transform -c config/*.yaml pipeline         # build + train + eval
 eeg-transform compare runs/multi_montage runs/multi_heatmap runs/universal_refs   # tabla comparativa de ejecuciones
 eeg-transform montage [--config config/montage_heatmap.yaml] [--montages 10-20,10-10]  # reconstrucción de montajes
 eeg-transform experiment-extrapolacion         # experimento sintético (no usa dataset ni config)
+eeg-transform topomap-video --input canonical --models multi_montage,universal_refs_conv --format gif  # vídeo-topomapa comparativo por ventana
 ```
 
 * `build`: descarga los sujetos/corridas indicados, filtra (bandpass y notch),
@@ -96,6 +105,16 @@ eeg-transform experiment-extrapolacion         # experimento sintético (no usa 
 * `experiment-extrapolacion`: estudio sintético de extrapolación de la spline
   esférica (y del lead field) a un hemisferio ciego; metodología en
   `docs/experimento_extrapolacion_hemisferio.md`.
+* `topomap-video`: genera un **vídeo-topomapa comparativo** (GIF/MP4). Cada marco
+  muestra un segmento temporal de la **referencia observada** en un topomapa de la
+  configuración elegida (`canonical` 64 ch ó `10-20` 19 ch) y, a su lado, los
+  topomapas de las **7 referencias estimadas por cada método** (línea base
+  analítica `T_d·pinv(T_s)` + modelos `free`, `multi_montage`, `multi_heatmap_v2`,
+  `universal_refs_conv`, `universal_refs_gru`), con las métricas de cada ruta en
+  la **ventana causal** que termina en ese instante (RMSE µV, VE, r). Entrena
+  (o reutiliza) los checkpoints pedidos; los temporales se evalúan con inferencia
+  causal `stride=1`. Salidas en `runs/topomap_video/figs/`: vídeo +
+  `*_metrics.csv` con las métricas por (método, marco, instante, ruta).
 
 ## Resultados principales
 
@@ -190,6 +209,9 @@ PYTHONPATH=src entorno/bin/python notebooks/generate_notebooks.py
 | `universal_refs_gru.yaml` | `universal_refs` | + célula recurrente GRU |
 | `universal_refs_cmp_{conv,gru,lstm,rnn}.yaml` | `universal_refs` | barrido comparativo de cabezas temporales |
 | `universal_refs_smoke.yaml` | `universal_refs` | humo CPU local de `universal_refs` |
+| `topomap_video_{free,multi_montage}.yaml` | variante | (re)entrenamiento para el vídeo-topomapa |
+| `topomap_video_multi_heatmap_v2.yaml` | `multi_heatmap_v2` | ídem, con campo de superficie |
+| `topomap_video_universal_refs_{conv,gru}.yaml` | `universal_refs` | ídem, con cabeza temporal conv/GRU |
 
 ## Estructura
 
@@ -224,16 +246,17 @@ PYTHONPATH=src entorno/bin/python notebooks/generate_notebooks.py
 │   ├── models/multi_montage.py  # autoencoder multi-configuración (P_s/Q_s fijos)
 │   ├── models/multi_heatmap.py  # multi-config + campo de superficie (S_s → malla)
 │   ├── training/trainer.py      # bucles/callbacks TF + build_multiconfig_model
-│   ├── evaluation/{metrics,plots}.py
+│   ├── evaluation/{metrics,plots,topomap_video}.py   # métricas, renders y vídeo-topomapa
 │   ├── experiments/{montage,multi,hemisphere}.py  # observaciones + experimento sintético
 │   ├── nb.py                    # helpers compartidos para los notebooks
-│   └── cli.py                   # build/train/eval/compare/pipeline/montage/experiment-extrapolacion
+│   └── cli.py                   # build/train/eval/compare/pipeline/montage/experiment-extrapolacion/topomap-video
 └── tests/
     ├── test_physics.py          # propiedades de las referencias y REST
     ├── test_config_ds.py        # config y dataset
     ├── test_montage.py          # proyección/modo montaje
     ├── test_multi.py            # generador y modelo multi-configuración
     ├── test_temporal.py         # cabeza temporal (conv/gru/lstm/rnn) + evaluador ventaneado
+    ├── test_topomap_video.py    # alineación/ventana/figura del vídeo-topomapa
     └── test_integration.py      # el modelo aprende los mapas sobre datos
 ```
 
