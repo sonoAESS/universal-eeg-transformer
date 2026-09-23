@@ -41,4 +41,7 @@ packages = ["src/eeg_transform"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra -q"
+addopts = "-ra -q -m 'not payoff'"
+markers = [
+    "payoff: criterios de aceptación de una SDD spec; requieren artefactos de entrenamiento/evaluación y se excluyen por defecto",
+]

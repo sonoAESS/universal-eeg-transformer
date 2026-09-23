@@ -268,3 +268,11 @@ PYTHONPATH=src entorno/bin/python notebooks/generate_notebooks.py
 * Para `universal_refs` con `temporal_window > 0`, la evaluación estándar
   alimenta tensores 2-D y **desactiva** la cabeza temporal: el beneficio se mide
   con la evaluación ventaneada (`metrics_windowed_test.csv` en el CLI).
+
+## Desarrollo guiado por especificación (SDD)
+
+Los trabajos de modelo/entrenamiento/evaluación se conducen por **specs**
+(`docs/specs/`): la especificación es la fuente de verdad y sus criterios de
+aceptación se codifican como tests `pytest` — los que necesitan artefactos de
+entrenamiento llevan `@pytest.mark.payoff` y se ejecutan explícitamente con
+`-m payoff`. Ver `docs/specs/spec-00-sdd-proceso.md`.

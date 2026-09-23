@@ -26,7 +26,8 @@ verdad conceptual). Resultados comparativos: `docs/results_comparison.md`.
 
 ```bash
 uv sync                                            # recrear entorno si hace falta
-PYTHONPATH=src entorno/bin/python -m pytest tests/ -q     # tests (rápido, sin GPU)
+PYTHONPATH=src entorno/bin/python -m pytest tests/ -q        # suite rápida (excluye payoff)
+PYTHONPATH=src entorno/bin/python -m pytest tests/test_spec_XX_* -m payoff -q  # aceptación SDD
 PYTHONPATH=src entorno/bin/python -m eeg_transform.cli --help
 eeg-transform -c config/smoke.yaml pipeline        # build + train + eval
 eeg-transform experiment-extrapolacion             # experimento sintético (sin dataset/config)
@@ -37,6 +38,22 @@ PYTHONPATH=src entorno/bin/python notebooks/generate_notebooks.py   # regenerar 
   commit. No requieren descargar eegbci.
 * La primera ejecución de `build` descarga PhysioNet eegbci y cachea en
   `data/processed/`; los checkpoints viven en `runs/<variante>/`.
+
+## Desarrollo guiado por especificación (SDD)
+
+* Proceso en `docs/specs/spec-00-sdd-proceso.md`; specs semilla:
+  `spec-01` (estabilizar `multi_heatmap_v2`), `spec-02` (reentrenar
+  `universal_refs_{conv,gru}`), `spec-03` (gate de calidad en `topomap-video`),
+  `spec-04` (reporte de rutas normalizado).
+* Una spec vive en `docs/specs/spec-XX-<slug>.md` (secciones obligatorias:
+  Contexto, Requisitos, Criterios de aceptación) y su test asociado en
+  `tests/test_spec_<slug>.py`. La spec es la **fuente de verdad**; si la
+  implementación contradice la spec, se reescribe la spec primero.
+* Los **criterios de aceptación** que requieren artefactos de
+  entrenamiento/evaluación van marcados `@pytest.mark.payoff` y se excluyen por
+  defecto (`-m 'not payoff'`); se ejecutan explícitamente con `-m payoff` como
+  verificación de aceptación.
+* Prefijo de commit: `spec(XX): ...` (p. ej. `spec(01): ...`).
 
 ## Convenciones de código
 
