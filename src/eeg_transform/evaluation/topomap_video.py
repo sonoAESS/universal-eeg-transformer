@@ -357,10 +357,10 @@ def topomap_video_fig(
 
     Filas = métodos; columnas = [entrada observada] + referencias estimadas.
     Devuelve ``(fig, update)`` donde ``update(f)`` refresca los topomapas y las
-    métricas del marco ``f``. El ``vmax`` se fija al percentil ``vmax_frac``
-    del segmento para que los colores sean estables entre marcos.
+    métricas del marco ``f``. Cada columna (referencia) normaliza con su propio
+    percentil ``vmax_frac``, estable entre marcos, para que se vea la actividad
+    de cada referencia sin que las de mayor amplitud laven a las demás.
     """
-    from .plots import KIND_LABELS
 
     n_rows = len(results)
     n_cols = 1 + len(TARGET_RFS)
@@ -379,15 +379,24 @@ def topomap_video_fig(
     M, valid, _ = scalp_grid_matrix(seg.positions, grid_px)
     px, py = _electrode_disc(seg.positions, grid_px)
 
-    # vmax estable sobre todo el segmento (entrada + estimaciones).
-    vals = [seg.obs]
-    for r in results:
-        # para el analítico no nulo y los modelos, los topomapas del segmento.
-        if hasattr(r, "preds"):
-            vals.extend(r.preds[d] for d in TARGET_RFS)
-    vmax = float(np.percentile(np.abs(np.concatenate(vals)), vmax_frac)) or 1.0
-    if not np.isfinite(vmax) or vmax <= 0:
-        vmax = 1.0
+    # Escala de color POR columna (referencia): una única escala para las 7
+    # referencias lava las de menor amplitud (unipolar/bipolar/CAR frente a
+    # REST/Laplaciano), y los NaN del calentamiento temporal invalidaban el
+    # percentil global. Cada columna usa su p(vmax_frac) estable en el tiempo,
+    # con un suelo de 10 µV para las columnas planas.
+    def _column_vmax(values: list[np.ndarray]) -> float:
+        if not values:
+            return 1e-5
+        stack = np.concatenate([np.abs(v.reshape(-1)) for v in values])
+        vm = float(np.nanpercentile(stack, 100.0 * vmax_frac))
+        if not np.isfinite(vm) or vm <= 0:
+            vm = 1e-5
+        return vm
+
+    entry_vmax = _column_vmax([seg.obs])
+    kind_vmax = {kind: _column_vmax([r.preds[kind] for r in results])
+                 for kind in TARGET_RFS}
+    column_vmax = [entry_vmax] + [kind_vmax[k] for k in TARGET_RFS]
 
     ims: list[list] = []
     texts: list[list] = []
@@ -400,8 +409,8 @@ def topomap_video_fig(
         for col in range(n_cols):
             ax = axes[row, col]
             im = ax.imshow(np.full((grid_px, grid_px), np.nan), cmap="RdBu_r",
-                           vmin=-vmax, vmax=vmax, origin="upper",
-                           interpolation="bicubic")
+                           vmin=-column_vmax[col], vmax=column_vmax[col],
+                           origin="upper", interpolation="bicubic")
             _settick(ax)
             ax.scatter(px, py, s=5, color="k", marker="o", zorder=5,
                        linewidths=0.15, edgecolors="w")
@@ -412,19 +421,17 @@ def topomap_video_fig(
             if col == 0:
                 ax.set_title(f"entrada\n{seg.label} · {seg.obs.shape[1]} elec.",
                              fontsize=8, pad=5)
-            else:
-                kind = TARGET_RFS[col - 1]
-                ax.set_title(KIND_LABELS.get(kind, kind), fontsize=8, pad=5)
         ims.append(row_ims)
         texts.append(row_texts)
 
-    # cabecera de columnas (referencias) con nombres en español
+    # cabecera de columnas (referencias) con nombres en español y la escala de
+    # cada columna para que la normalización por referencia sea explícita.
+    axes[0, 0].set_title(f"entrada · {seg.obs.shape[1]} elec.\n"
+                         f"±{entry_vmax * 1e6:.0f} µV", fontsize=7, pad=10)
     for col, kind in enumerate(TARGET_RFS, start=1):
-        axes[0, col].set_title(KIND_LABELS_ES.get(kind, kind), fontsize=8,
-                               pad=10)
-
-    fig.colorbar(ims[0][-1], ax=list(axes[:, -1]), shrink=0.8, pad=0.015,
-                 label="potencial (V)")
+        axes[0, col].set_title(f"{KIND_LABELS_ES.get(kind, kind)}\n"
+                               f"±{kind_vmax[kind] * 1e6:.0f} µV",
+                               fontsize=7, pad=10)
 
     ax_prog = fig.add_axes([0.58, 0.005, 0.3, 0.012])
     _settick(ax_prog)
@@ -518,12 +525,15 @@ def run_topomap_video(
     formats: tuple[str, ...] = ("gif",),
     out_dir: str | Path = "runs/topomap_video/figs",
     force_train: bool = False,
+    frame: int | None = None,
 ) -> dict:
     """Genera el vídeo-topomapa comparativo completo.
 
     Entrena (o reutiliza) los modelos pedidos, selecciona el segmento de
-    ``duration_s`` segundos del split ``test`` y serializa la animación.
-    Devuelve ``{"figuras": {"gif": Path, ...}, "metrics": Path}``.
+    ``duration_s`` segundos del split ``test`` y serializa la animación. Si se
+    da ``frame``, en su lugar guarda una imagen estática PNG del instante
+    ``frame`` (índice de muestra, acotado al rango válido). Devuelve
+    ``{"figuras": {"gif": Path, ...}, "metrics": Path}``.
     """
     from .plots import set_plot_backend
 
@@ -589,9 +599,21 @@ def run_topomap_video(
                                 sfreq=sfreq, window=window)
 
     saved: dict[str, Path] = {}
-    for fmt in formats:
-        saved[fmt] = save_topomap_video(fig, update, n_frames,
-                                        out_dir / fname, fps=fps, format=fmt)
+    if frame is not None:
+        k0 = int(results[0].frames[0])
+        k = max(k0, min(int(frame), int(results[0].frames[-1])))
+        update(int(k - k0))
+        png_path = out_dir / f"{fname}_t{k}.png"
+        png_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(png_path, dpi=140)
+        plt.close(fig)
+        log.info("Imagen estática: %s (instante %d)", png_path, k)
+        saved["png"] = png_path
+    else:
+        for fmt in formats:
+            saved[fmt] = save_topomap_video(fig, update, n_frames,
+                                            out_dir / fname, fps=fps,
+                                            format=fmt)
 
     metrics_all = pd.concat(
         [r.metrics.assign(method=r.name) for r in results], ignore_index=True)

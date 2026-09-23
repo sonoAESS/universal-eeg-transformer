@@ -322,6 +322,7 @@ def cmd_topomap_video(args) -> None:
         fps=args.fps, formats=formats,
         out_dir=args.out_dir,
         force_train=args.force_train,
+        frame=args.frame,
     )
     for fmt, path in out["figuras"].items():
         print(f"[{fmt}] {path}")
@@ -399,6 +400,11 @@ def main(argv: list[str] | None = None) -> int:
                        help="Directorio de salida.")
     p_vid.add_argument("--force-train", action="store_true",
                        help="Reentrena los modelos aunque haya checkpoints.")
+    p_vid.add_argument(
+        "--frame", type=int, default=None,
+        help="Si se da, guarda una imagen PNG estática del instante "
+             "(índice de muestra) en lugar del vídeo.",
+    )
 
     args = parser.parse_args(argv)
 
