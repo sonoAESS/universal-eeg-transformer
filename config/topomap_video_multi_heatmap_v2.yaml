@@ -1,0 +1,72 @@
+# Variante `multi_heatmap_v2` para el vídeo-topomapa comparativo (topomap-video).
+# Entrenamiento multi-configuración con campo de superficie reducido a
+# ['10-20', 'canonical'] sobre sujetos 1-2 y las 7 referencias actuales;
+# checkpoint en runs/topomap_video/multi_heatmap_v2.
+data:
+  subjects: [1, 2]
+  runs: [1, 2]
+  bandpass: [1.0, 45.0]
+  notch: []
+  unipolar_ref_ch: "Cz"
+  original_reference: "left_mastoid"
+  artifact_z_thresh: 6.0
+  bad_channel_z_thresh: 4.0
+  n_jobs: 1
+
+leadfield:
+  head_radius: 0.09
+  rel_radii: [0.87, 0.90, 0.97, 1.00]
+  sigmas: [0.33, 1.0, 0.0042, 0.33]
+  brain_radius: 0.078
+  src_grid_mm: 10.0
+  rest_rcond: 0.0001
+  rest_rcond_cv: false
+  rest_rcond_candidates: [1e-2, 1e-3, 1e-4, 1e-5]
+
+dataset:
+  cache_dir: data/processed
+  split_mode: block
+  test_frac: 0.2
+  val_frac: 0.2
+  seed: 42
+  max_samples_per_subject: 60000
+  dtype: float32
+
+mapping:
+  method: spline
+  montage: "10-20"
+  n_components: null
+  smoothness: 1.0e-5
+  adaptive_smoothness: true
+  grid_px: 64
+  configs: ["10-20", "canonical"]
+  multi_max_samples_per_split: 8000
+
+model:
+  variant: multi_heatmap_v2
+  latent_dim: 0
+  use_bias: false
+  kernel_regularizer_l2: 1.0e-6
+  optimizer: adam
+  learning_rate: 1.0e-3
+  surface_loss_weight: 0.1
+  learnable_interp: true
+  field_consistency_weight: 0.1
+  xconfig_consistency_weight: 0.1
+  adapter_rank: 0
+  temporal_smoothness_weight: 0.0
+  learn_uncertainty: false
+
+training:
+  epochs: 60
+  batch_size: 1024
+  early_stop_patience: 10
+  reduce_lr_patience: 5
+  reduce_lr_factor: 0.5
+  min_lr: 1.0e-5
+  shuffle_buffer: 20000
+  prefetch: 4
+  run_dir: runs/topomap_video/multi_heatmap_v2
+  log_file: runs/topomap_video/multi_heatmap_v2/train.log
+  save_best_only: true
+  seed: 42

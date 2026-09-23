@@ -1,0 +1,61 @@
+# Variante `free` para el vídeo-topomapa comparativo (topomap-video).
+# Reentrena el autoencoder universal sobre sujetos 1-2 con las 7 referencias
+# actuales; checkpoint en runs/topomap_video/free.
+out_dir: runs/topomap_video/free
+data:
+  subjects: [1, 2]
+  runs: [1, 2]
+  bandpass: [1.0, 45.0]
+  notch: []
+  unipolar_ref_ch: "Cz"
+  original_reference: "left_mastoid"
+  artifact_z_thresh: 6.0
+  bad_channel_z_thresh: 4.0
+  n_jobs: 1
+
+leadfield:
+  head_radius: 0.09
+  rel_radii: [0.87, 0.90, 0.97, 1.00]
+  sigmas: [0.33, 1.0, 0.0042, 0.33]
+  brain_radius: 0.078
+  src_grid_mm: 10.0
+
+dataset:
+  cache_dir: data/processed
+  split_mode: block
+  test_frac: 0.2
+  val_frac: 0.2
+  seed: 42
+  max_samples_per_subject: 60000
+  dtype: float32
+
+mapping:
+  method: spline
+  montage: "10-20"
+  n_components: null
+  smoothness: 1.0e-5
+  adaptive_smoothness: true
+  grid_px: 64
+  configs: ["canonical"]
+
+model:
+  latent_dim: 0        # 0 = igual al número de canales
+  use_bias: false
+  kernel_regularizer_l2: 1.0e-6
+  optimizer: adam
+  learning_rate: 1.0e-3
+  variant: free
+
+training:
+  epochs: 60
+  batch_size: 1024
+  early_stop_patience: 10
+  reduce_lr_patience: 5
+  reduce_lr_factor: 0.5
+  min_lr: 1.0e-5
+  shuffle_buffer: 20000
+  prefetch: 4
+  run_dir: runs/topomap_video/free
+  log_file: runs/topomap_video/free/train.log
+  save_best_only: true
+  seed: 42
