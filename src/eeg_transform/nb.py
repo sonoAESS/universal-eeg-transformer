@@ -10,8 +10,9 @@ para mostrarse inline):
 
 * :func:`load_experiment`   → ``(cfg, ds)`` cargados desde el YAML.
 * :func:`train_variant`     → entrena/reutiliza el modelo y devuelve la historia.
-* :func:`evaluate`          → tablas de métricas, error Frobenius y composición.
-* :func:`plot_training`, :func:`plot_routes`, :func:`plot_traces`.
+* :func:`evaluate_montage` / :func:`evaluate_multiconfig*` → métricas.
+* :func:`plot_training`, :func:`plot_routes`, :func:`plot_scalp`,
+  :func:`plot_multiconfig*`.
 """
 
 from __future__ import annotations
@@ -26,11 +27,8 @@ from .data.dataset import MultiReferenceDataset, build_dataset
 from .evaluation import metrics, plots
 from .logging_conf import get_logger
 from .training.trainer import (
-    build_model,
     build_montage_inputs,
-    build_multiconfig_model,
     is_montage_variant,
-    is_multiconfig_variant,
     load_multiconfig_data,
     train,
 )
@@ -56,28 +54,6 @@ def montage_inputs(cfg: EEGTransformConfig, ds: MultiReferenceDataset):
     return build_montage_inputs(cfg, ds)
 
 
-def ensure_model(
-    cfg: EEGTransformConfig,
-    ds: MultiReferenceDataset,
-) -> object:
-    """Instancia el modelo con los pesos del checkpoint (best.weights.h5).
-
-    Fallbacks en orden: checkpoint guardado → modelo recién entrenado por
-    :func:`train_variant`. Nunca devuelve pesos aleatorios salvo que se pida
-    ``train`` explícito y no exista checkpoint.
-    """
-    run_dir = Path(cfg.training.run_dir)
-    checkpoint = run_dir / "best.weights.h5"
-    mi = montage_inputs(cfg, ds)
-    model = build_model(cfg, ds.n_channels,
-                        projection=mi.projection if mi else None)
-    model.ensure_built()
-    if checkpoint.exists():
-        model.load_weights(str(checkpoint))
-        log.info("Modelo cargado desde %s", checkpoint)
-    return model
-
-
 def train_variant(
     cfg: EEGTransformConfig,
     ds: MultiReferenceDataset,
@@ -92,19 +68,6 @@ def train_variant(
     """
     model, history = train(ds, cfg, force=force)
     return model, history
-
-
-def evaluate(
-    cfg: EEGTransformConfig,
-    ds: MultiReferenceDataset,
-    model,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Métricas por ruta, error Frobenius y consistencia de composición."""
-    uni_idx = ds.ch_names.index(cfg.data.unipolar_ref_ch)
-    metrics_df = metrics.evaluate_routes(model, ds, split="test")
-    err_matrix = metrics.transfer_error_matrix(model, ds, uni_idx, cfg)
-    cons = metrics.composition_error_table(model, ds)
-    return metrics_df, err_matrix, cons
 
 
 def evaluate_montage(
@@ -149,19 +112,6 @@ def plot_scalp(cfg, ds, model, montage=None):
 def multiconfig_data(cfg: EEGTransformConfig, ds: MultiReferenceDataset):
     """Datos multi-configuración (observaciones por configuración + refs)."""
     return load_multiconfig_data(cfg, ds)
-
-
-def ensure_multiconfig_model(cfg: EEGTransformConfig, ds: MultiReferenceDataset,
-                             data: object | None = None):
-    """Modelo multi-configuración con el checkpoint cargado si existe."""
-    data = data or multiconfig_data(cfg, ds)
-    model = build_multiconfig_model(cfg, data)
-    model.ensure_built()
-    checkpoint = Path(cfg.training.run_dir) / "best.weights.h5"
-    if checkpoint.exists():
-        model.load_weights(str(checkpoint))
-        log.info("Modelo multi-configuración cargado desde %s", checkpoint)
-    return model
 
 
 def evaluate_multiconfig(
@@ -275,14 +225,6 @@ def plot_multiconfig_surface(metrics_surface_df: pd.DataFrame, title: str):
     return fig
 
 
-def summarize(metrics_df: pd.DataFrame) -> pd.DataFrame:
-    """Resumen diagonal/cruzada en unidades legibles (RMSE µV)."""
-    sm = metrics.summarize(metrics_df, "test").copy()
-    for col in ("mse", "rmse", "mae"):
-        sm[col + "_uV"] = sm[col] * 1e6
-    return sm[["tipo", "rmse_uV", "mae_uV", "r"]]
-
-
 def plot_training(history_csv: str | Path):
     """Figura de curvas de aprendizaje."""
     plots.set_plot_backend("inline")
@@ -297,16 +239,6 @@ def plot_routes(metrics_df: pd.DataFrame, value_col: str = "rmse",
     if value_col in ("rmse", "mae", "mse"):
         df[value_col] = df[value_col] * 1e6
     return plots.heatmap_fig(df, value_col, title)
-
-
-def plot_traces(model, ds, cfg: EEGTransformConfig):
-    """Figura de trazas reales vs predichas (canal de evaluación)."""
-    plots.set_plot_backend("inline")
-    return plots.traces_fig(
-        model, ds, split="test",
-        channel=cfg.evaluation.plot_channel,
-        n_samples=cfg.evaluation.n_plot_samples,
-    )
 
 
 def config_table(cfg: EEGTransformConfig) -> pd.DataFrame:

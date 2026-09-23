@@ -31,7 +31,6 @@ adquisición.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -178,20 +177,6 @@ REFERENCE_BUILDERS: Dict[str, Callable[..., np.ndarray]] = {
     "car": car_matrix,
     "rest": rest_matrix,
 }
-
-
-@dataclass
-class ReferenceHandle:
-    """Matriz de una referencia y su constructor parametrizado."""
-
-    kind: str
-    matrix: np.ndarray
-    n_channels: int
-    params: dict
-
-    def apply(self, X: np.ndarray) -> np.ndarray:
-        """Aplica la referencia a ``X`` de forma ``(time, channels)``."""
-        return X @ self.matrix
 
 
 def build_reference_matrix(
