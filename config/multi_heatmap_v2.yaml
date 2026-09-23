@@ -55,7 +55,6 @@ model:
   kernel_regularizer_l2: 1.0e-6
   optimizer: adam
   learning_rate: 1.0e-3
-  comp_penalty_weight: 0.0
   surface_loss_weight: 0.1
   # --- mejoras v2 ---
   learnable_interp: true

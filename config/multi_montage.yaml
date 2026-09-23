@@ -48,7 +48,6 @@ model:
   kernel_regularizer_l2: 1.0e-6
   optimizer: adam
   learning_rate: 1.0e-3
-  comp_penalty_weight: 0.0
 
 training:
   epochs: 60

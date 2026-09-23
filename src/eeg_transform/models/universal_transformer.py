@@ -21,46 +21,18 @@ Variantes de arquitectura (``model.variant``):
 
 * ``free``
     Autoencoder libre: 8 matrices `C x C` aprendidas sin restricciones.
-* ``group``
-    El decodificador de cada montaje es la **pseudo-inversa** del encoder del
-    mismo montaje (``W^{dec}_k = (W^{enc}_k)^+``); no hay variables de
-    decodificador. Esto impone de forma *exacta* dos propiedades físicas que
-    el encadenado analítico ``T_d pinv(T_s)`` no satisface (el error de
-    composición del baseline analítico es del orden de 1):
-
-    - ``A_{s->s} = W_s (W_s)^+`` es un proyector: identidad sobre el subespacio
-      observable (señales sin componente constante).
-    - Transitividad exacta: ``A_{s->d} A_{d->u} = A_{s->u}`` para todo
-      par, de modo que las referencias forman un **grupo** en el subespacio
-      observable. Los encoders usan la proyección ``P`` (como en
-      ``projected``), lo que garantiza la exactitud incluso con las matrices
-      empíricas de inicialización.
-
-* ``projected``
-    Cada matriz aprendida se parametriza como ``W = P W_raw`` con ``P =
-    I - 11^T/C``; por construcción toda salida anula el modo constante
-    instantáneo (todas las rutas son "referencias válidas", no pueden
-    introducir un DC espurio).
-
-* ``soft_group``
-    Arquitectura libre (8 matrices) con una **penalización suave** de la
-    consistencia de composición en la pérdida: cada lote suma
-    ``w * <error de composición>`` a la pérdida total. Interpola entre
-    ``free`` (sin restricción) y ``group`` (estructura exacta): obliga a
-    componer bien ``A_{s->d} A_{d->u} ≈ A_{s->u}`` sin imponer la
-    pseudo-inversa rígida que degrada la convergencia de ``group``.
+    Es el núcleo canónico sobre el que se construyen las variantes de montaje
+    (``montage_*``) y multi-configuración (``multi_*``, ``universal_refs``).
 """
 
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Dict, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers, losses
-from tensorflow.keras.initializers import Initializer
-from tensorflow.keras.regularizers import Regularizer
 
 from ..config import MODEL_VARIANTS, REFERENCE_KINDS, ModelConfig
 from ..logging_conf import get_logger
@@ -70,93 +42,6 @@ log = get_logger(__name__)
 INITIALIZER_SEED = 42
 
 VARIANT_FREE = "free"
-VARIANT_GROUP = "group"
-VARIANT_PROJECTED = "projected"
-VARIANT_SOFT_GROUP = "soft_group"
-
-
-class _CenteredDense(layers.Layer):
-    """Dense lineal cuya salida anula el modo constante instantáneo.
-
-    Modos de centrado sobre el kernel efectivo:
-
-    * ``"col"`` (``W_eff = P @ W``): ``1^T W_eff = 0`` → la salida anula una
-      entrada constante sobre canales (propiedad básica de referencia).
-    * ``"both"`` (``W_eff = P @ W @ P``): además ``W_eff @ 1 = 0`` → el
-      *rowspace* vive en el subespacio observable. Con ``P`` el proyector de
-      centrado ``I - 11^T/C``. Requiere ``units == n_channels`` y garantiza
-      que una familia ``W_k`` comparta el mismo subespacio observable, lo que
-      hace exacta la composición de grupo de la variante ``group``.
-    """
-
-    def __init__(
-        self,
-        units: int,
-        n_channels: int,
-        use_bias: bool = False,
-        kernel_regularizer: Regularizer | None = None,
-        kernel_initializer: Initializer | Any = None,
-        name: str = "centered_dense",
-        center_mode: str = "col",
-    ):
-        super().__init__(name=name)
-        self.units = units
-        self.n_channels = n_channels
-        self.use_bias = use_bias
-        self.kernel_regularizer = kernel_regularizer
-        self.kernel_initializer = kernel_initializer
-        self.center_mode = center_mode
-        self.proj = tf.constant(
-            np.eye(n_channels, dtype=np.float32)
-            - np.ones((n_channels, n_channels), dtype=np.float32) / n_channels,
-            dtype=tf.float32, name="p_centrado",
-        )
-        if self.center_mode not in ("col", "both"):
-            raise ValueError(f"center_mode debe ser 'col' o 'both': {center_mode}")
-
-    def build(self, input_shape):
-        self.kernel = self.add_weight(
-            name="kernel",
-            shape=(self.n_channels, self.units),
-            initializer=self.kernel_initializer or "glorot_uniform",
-            regularizer=self.kernel_regularizer,
-            trainable=True,
-        )
-        if self.use_bias:
-            self.bias = self.add_weight(
-                name="bias", shape=(self.units,), initializer="zeros",
-                trainable=True,
-            )
-        self.built = True
-
-    def _effective(self, w: tf.Tensor) -> tf.Tensor:
-        out = tf.matmul(self.proj, w)          # (n_channels, units)
-        if self.center_mode == "both":
-            out = tf.matmul(out, self.proj)    # (n_channels, n_channels)
-        return out
-
-    def call(self, inputs):
-        out = tf.matmul(inputs, self._effective(self.kernel))
-        if self.use_bias:
-            out = out + self.bias
-        return out
-
-    def get_config(self):
-        from tensorflow.keras.initializers import serialize as s_init
-        from tensorflow.keras.regularizers import serialize as s_reg
-
-        cfg = {
-            "units": self.units,
-            "n_channels": self.n_channels,
-            "use_bias": self.use_bias,
-            "kernel_regularizer": s_reg(self.kernel_regularizer)
-            if self.kernel_regularizer else None,
-            "kernel_initializer": s_init(self.kernel_initializer)
-            if isinstance(self.kernel_initializer, Initializer) else None,
-            "name": self.name,
-            "center_mode": self.center_mode,
-        }
-        return cfg
 
 
 class UniversalEEGTransformer(tf.keras.Model):
@@ -203,43 +88,13 @@ class UniversalEEGTransformer(tf.keras.Model):
         kernel_init = tf.keras.initializers.GlorotUniform(seed=INITIALIZER_SEED)
 
         def _make_enc(k: str) -> layers.Layer:
-            if self.variant == VARIANT_PROJECTED:
-                return _CenteredDense(
-                    self.latent_dim, n_channels,
-                    use_bias=model_cfg.use_bias,
-                    kernel_regularizer=regularizer,
-                    kernel_initializer=kernel_init, name=f"enc_{k}",
-                    center_mode="col",
-                )
-            if self.variant == VARIANT_GROUP:
-                # Centrado doble (observable) para que las pseudo-inversas de
-                # montajes distintos compartan subespacio y la composición de
-                # grupo sea exacta.
-                return _CenteredDense(
-                    self.latent_dim, n_channels,
-                    use_bias=model_cfg.use_bias,
-                    kernel_regularizer=regularizer,
-                    kernel_initializer=kernel_init, name=f"enc_{k}",
-                    center_mode="both",
-                )
             return layers.Dense(
                 self.latent_dim, use_bias=model_cfg.use_bias,
                 kernel_regularizer=regularizer, kernel_initializer=kernel_init,
                 name=f"enc_{k}",
             )
 
-        def _make_dec(k: str) -> layers.Layer | None:
-            if self.variant == VARIANT_GROUP:
-                # El decodificador es la pseudo-inversa del encoder del mismo
-                # montaje; no hay variables propias.
-                return None
-            if self.variant == VARIANT_PROJECTED:
-                return _CenteredDense(
-                    n_channels, n_channels,
-                    use_bias=model_cfg.use_bias,
-                    kernel_regularizer=regularizer,
-                    kernel_initializer=kernel_init, name=f"dec_{k}",
-                )
+        def _make_dec(k: str) -> layers.Layer:
             return layers.Dense(
                 n_channels, use_bias=model_cfg.use_bias,
                 kernel_regularizer=regularizer, kernel_initializer=kernel_init,
@@ -287,9 +142,8 @@ class UniversalEEGTransformer(tf.keras.Model):
         regresión ridge ``x_s -> z`` y ``W_dec^d`` la regresión ridge
         ``z -> x_d``.
 
-        * En ``free``/``projected`` se asignan encoder y decoder por ruta.
-        * En ``group`` solo se asignan los encoders ``W_enc^k = ridge(x_k ->
-          z)``; los decodificadores (pseudo-inversas) se derivan en el forward.
+        * En ``free``/las variantes derivadas se asignan encoder y decoder por
+          ruta.
 
         Parameters
         ----------
@@ -318,12 +172,23 @@ class UniversalEEGTransformer(tf.keras.Model):
             lmb = float(ridge * np.trace(xtx) / C + 1e-15)
             return np.linalg.solve(xtx + lmb * np.eye(C), x.T @ y / n).astype(np.float32)
 
-        if self.variant != VARIANT_GROUP:
-            for d in self.kinds:
-                w = _ridge(uni - means["unipolar"], refs[d] - means[d])
-                self.decoders[d].kernel.assign(w)
-                if self.decoders[d].use_bias:
-                    self.decoders[d].bias.assign(np.zeros(C, np.float32))
+        C = self.n_channels
+        self.ensure_built()
+
+        uni = refs["unipolar"].astype(np.float32)
+        means = {k: float(v.mean()) for k, v in refs.items()}
+
+        def _ridge(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+            n = x.shape[0]
+            xtx = x.T @ x / n
+            lmb = float(ridge * np.trace(xtx) / C + 1e-15)
+            return np.linalg.solve(xtx + lmb * np.eye(C), x.T @ y / n).astype(np.float32)
+
+        for d in self.kinds:
+            w = _ridge(uni - means["unipolar"], refs[d] - means[d])
+            self.decoders[d].kernel.assign(w)
+            if self.decoders[d].use_bias:
+                self.decoders[d].bias.assign(np.zeros(C, np.float32))
         for s in self.kinds:
             w = _ridge(refs[s] - means[s], uni - means["unipolar"])
             self.encoders[s].kernel.assign(w)
@@ -337,55 +202,19 @@ class UniversalEEGTransformer(tf.keras.Model):
         return self.encoders[source](inputs)
 
     def decode(self, latent: tf.Tensor, dest: str) -> tf.Tensor:
-        if self.variant == VARIANT_GROUP:
-            w = self._effective_kernel_tf(self.encoders[dest])  # (C, C)
-            winv = tf.linalg.pinv(w)
-            return tf.matmul(latent, winv)
         return self.decoders[dest](latent)
 
     def _effective_kernel_tf(self, layer: layers.Layer) -> tf.Tensor:
-        w = layer.kernel
-        if isinstance(layer, _CenteredDense):
-            return layer._effective(w)
-        return w
+        return layer.kernel
 
     def _transfer_matrices_tf(self) -> Dict[Tuple[str, str], tf.Tensor]:
-        """Matrices efectivas ``A_{s->d}`` como tensores (variante ``group`` no
-        es diferenciable de forma estable a través de ``pinv``; se excluye)."""
+        """Matrices efectivas ``A_{s->d}`` como tensores."""
         enc = {k: self._effective_kernel_tf(self.encoders[k]) for k in self.kinds}
         dec = {k: self._effective_kernel_tf(self.decoders[k]) for k in self.kinds}
         return {
             (s, d): tf.matmul(enc[s], dec[d])
             for s in self.kinds for d in self.kinds
         }
-
-    def _soft_group_penalty(self) -> tf.Tensor:
-        """Penalización suave de composición ``s->d->u`` en TF.
-
-        Suma las normas relativas ``||P(A_{s->d} A_{d->u} - A_{s->u})P||_F /
-        ||P A_{s->u} P||_F`` sobre todos los tripletes. Alcanza 0 si el
-        modelo aprende la estructura de grupo de forma exacta.
-        """
-        C = self.n_channels
-        p = tf.constant(
-            np.eye(C, dtype=np.float32) - np.ones((C, C), dtype=np.float32) / C,
-            dtype=tf.float32,
-        )
-        mats = self._transfer_matrices_tf()
-        p_mats = {key: tf.matmul(tf.matmul(p, m), p) for key, m in mats.items()}
-
-        def _fro(m: tf.Tensor) -> tf.Tensor:
-            return tf.sqrt(tf.reduce_sum(tf.square(m)))
-
-        terms = []
-        for s in self.kinds:
-            for d in self.kinds:
-                for u in self.kinds:
-                    lhs = tf.matmul(p_mats[(s, d)], p_mats[(d, u)])
-                    rhs = p_mats[(s, u)]
-                    denom = _fro(rhs) + 1e-8
-                    terms.append(_fro(lhs - rhs) / denom)
-        return tf.reduce_sum(terms) / (len(self.kinds) ** 3)
 
     def call(self, inputs, source: str | None = None, **kwargs):
         """Predicción universal.
@@ -420,34 +249,21 @@ class UniversalEEGTransformer(tf.keras.Model):
     def _effective_kernel(self, layer: layers.Layer | None) -> np.ndarray:
         if layer is None:
             return None
-        w = layer.kernel.numpy().astype(np.float64)
-        if isinstance(layer, _CenteredDense):
-            p = np.eye(self.n_channels, dtype=np.float64) - np.ones(
-                (self.n_channels, self.n_channels), dtype=np.float64) / self.n_channels
-            out = p @ w
-            if layer.center_mode == "both":
-                out = out @ p
-            return out
-        return w
+        return layer.kernel.numpy().astype(np.float64)
 
     def transfer_matrices(self) -> Dict[Tuple[str, str], np.ndarray]:
-        """Devuelve ``A_{s->d}`` para cada ruta (C x C), según la variante.
+        """Devuelve ``A_{s->d}`` para cada ruta (C x C).
 
-        * ``free``/``projected``/``soft_group``: ``W_enc^s @ W_dec^d``.
-        * ``group``: ``W_enc^s @ pinv(W_enc^d)``.
-        * **modo montaje**: ``P @ W_enc^s @ W_dec^d`` con ``P`` la proyección
-          fija ``C_s -> C``; cada matriz mapea la observación del montaje
-          fuente a los canales canónicos ``(C_s, C)``.
+        ``free`` y sus derivadas: ``W_enc^s @ W_dec^d``. En **modo montaje**
+        se antepone la proyección fija ``P``: cada matriz mapea la observación
+        del montaje fuente a los canales canónicos ``(C_s, C)``.
         """
         enc = {k: self._effective_kernel(self.encoders[k]) for k in self.kinds}
         dec = {k: self._effective_kernel(self.decoders[k]) for k in self.kinds}
         out: Dict[Tuple[str, str], np.ndarray] = {}
         for s in self.kinds:
             for d in self.kinds:
-                if self.variant == VARIANT_GROUP:
-                    core = enc[s] @ np.linalg.pinv(enc[d], rcond=1e-8)
-                else:
-                    core = enc[s] @ dec[d]
+                core = enc[s] @ dec[d]
                 if self.projection is not None:
                     core = np.float64(self.projection) @ core  # (C_s, C)
                 out[(s, d)] = core
@@ -457,8 +273,8 @@ class UniversalEEGTransformer(tf.keras.Model):
         """Error de composición (física de grupo) por triplete ``s->d->u``.
 
         Mide ``||P(A_{s->d} A_{d->u} - A_{s->u})P||_F / ||P A_{s->u} P||_F``
-        con ``P`` el proyector de centrado. Es 0 exacto para la variante
-        ``group`` y ``~1`` para el encadenado analítico ``T_d pinv(T_s)``.
+        con ``P`` el proyector de centrado. Es ``~1`` para el encadenado
+        analítico ``T_d pinv(T_s)``.
 
         En **modo montaje** las matrices ``A`` mapean ``C_s -> C`` y la
         composición entre rutas no está definida en el mismo espacio; se
@@ -565,8 +381,6 @@ class UniversalEEGTransformer(tf.keras.Model):
             total = tf.reduce_sum(
                 tf.stack([tf.stack(list(r.values())) for r in route_losses.values()])
             )
-            if self.variant == VARIANT_SOFT_GROUP and self.projection is None:
-                total = total + self.model_cfg.comp_penalty_weight * self._soft_group_penalty()
             if self.losses:
                 total = total + tf.add_n(self.losses)  # regularizaciones L2
 
@@ -587,8 +401,6 @@ class UniversalEEGTransformer(tf.keras.Model):
         total = tf.reduce_sum(
             tf.stack([tf.stack(list(r.values())) for r in route_losses.values()])
         )
-        if self.variant == VARIANT_SOFT_GROUP and self.projection is None:
-            total = total + self.model_cfg.comp_penalty_weight * self._soft_group_penalty()
         self.loss_tracker.update_state(total / (len(self.kinds) ** 2))
         self.mse_tracker.update_state(self._real_mse(sources, targets))
         return {

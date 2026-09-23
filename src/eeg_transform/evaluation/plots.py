@@ -572,10 +572,9 @@ def multi_run_heatmap_fig(
 def multi_run_consistency_fig(runs: list[Path]) -> plt.Figure:
     """Barras del error de composición (mean/max) por variante.
 
-    Lee ``consistency.csv`` de cada corrida: la variante ``group`` debe dar
-    error casi 0 exacto; ``free``/``projected``, finito pero pequeño si la
-    data es informativa. El baseline analítico ``T_d pinv(T_s)`` no es un
-    grupo (error ≈ 1).
+    Lee ``consistency.csv`` de cada corrida: ``free`` y sus derivadas dan un
+    error finito pero pequeño si la data es informativa. El baseline analítico
+    ``T_d pinv(T_s)`` no es un grupo (error ≈ 1).
     """
     summ = []
     for run in runs:

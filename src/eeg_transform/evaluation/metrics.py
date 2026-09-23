@@ -225,7 +225,6 @@ def composition_error_table(model, ds) -> pd.DataFrame:
     Para cada triplete ``s -> d -> u`` se mide
     ``||P(A_{s->d} A_{d->u} - A_{s->u})P||_F / ||P A_{s->u} P||_F``.
 
-    * Un modelo con estructura de grupo exacta (variante ``group``) da 0.
     * El encadenado analítico ``T_d pinv(T_s)`` no satisface la propiedad
       (error del orden de 1): compone mal aunque cada ruta individual sea
       algebraica.

@@ -153,8 +153,7 @@ class MappingConfig:
     )
     multi_max_samples_per_split: int = 40_000
 
-
-def __post_init__(self):
+    def __post_init__(self):
         # PyYAML puede dejar notaciones como '1e-5' como cadena; se coerciona.
         try:
             self.smoothness = float(self.smoothness)
@@ -172,12 +171,8 @@ def __post_init__(self):
 
 
 # Variantes de arquitectura del transformador (ver models.universal_transformer).
-#   * ``free``     : autoencoder lineal libre (todas las matrices aprendidas).
-#   * ``group``    : decodificador = pseudo-inversa del encoder del mismo
-#                    montaje; impone consistencia de composición EXACTA
-#                    (transitividad y auto-reconstrucción = proyector).
-#   * ``projected``: todas las matrices aprendidas anulan por construcción el
-#                    modo constante (físicamente válidas como referencias).
+#   * ``free``     : autoencoder lineal libre (todas las matrices aprendidas),
+#                    núcleo canónico del resto de variantes.
 #   * ``montage_leadfield``: unificación de montajes con **solución inversa**:
 #                    las observaciones de un montaje de ``C_s`` electrodos
 #                    entran por un proyector fijo construido con el lead field
@@ -198,7 +193,7 @@ def __post_init__(self):
 #                    El modelo acepta cualquier configuración y predice, EN ESA
 #                    configuración, las medidas con otra referencia.
 MODEL_VARIANTS: tuple[str, ...] = (
-    "free", "group", "projected", "soft_group",
+    "free",
     "montage_leadfield", "montage_heatmap",
     "multi_montage", "multi_heatmap", "multi_heatmap_v2",
     # universal_refs: 7 referencias + cabeza temporal de residuo
@@ -222,9 +217,6 @@ class ModelConfig:
     optimizer: str = "adam"
     learning_rate: float = 1e-3
     variant: str = "free"
-    # Peso de la penalización de consistencia de composición (soft_group):
-    # termina la física de grupo como pérdida suave en lugar de estructura.
-    comp_penalty_weight: float = 0.0
     # Peso del término de pérdida en el CAMPO DE SUPERFICIE (latente del
     # "heatmap") para la variante ``multi_heatmap``: además del MSE por
     # electrodo, se ajusta la actividad interpolada sobre la malla del cuero
@@ -280,7 +272,7 @@ class ModelConfig:
             v = getattr(self, name)
             if isinstance(v, str):
                 setattr(self, name, v.strip().lower() in ("true", "1", "yes"))
-        for name in ("kernel_regularizer_l2", "learning_rate", "comp_penalty_weight",
+        for name in ("kernel_regularizer_l2", "learning_rate",
                      "surface_loss_weight", "field_consistency_weight",
                      "xconfig_consistency_weight", "temporal_smoothness_weight",
                      "temporal_residual_weight", "mode_penalty_weight"):
@@ -442,17 +434,6 @@ class EEGTransformConfig:
             )
         if self.mapping.grid_px <= 0:
             raise ValueError("mapping.grid_px debe ser > 0.")
-        if self.model.variant == "group" and self.model.use_bias:
-            raise ValueError("variant='group' requiere use_bias: false.")
-        if self.model.variant == "group" and not (
-            self.model.latent_dim in (0, -1)
-        ):
-            raise ValueError(
-                "variant='group' requiere latent_dim 0/auto (debe igualar "
-                "n_canales para pseudo-invertir)."
-            )
-        if self.model.variant == "soft_group" and not (0.0 <= self.model.comp_penalty_weight <= 10.0):
-            raise ValueError("soft_group requiere comp_penalty_weight en (0, 10].")
         if len(self.leadfield.rel_radii) != len(self.leadfield.sigmas):
             raise ValueError(
                 "rel_radii y sigmas deben tener la misma longitud (capas concéntricas)."
