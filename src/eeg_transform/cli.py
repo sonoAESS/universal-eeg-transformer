@@ -6,6 +6,7 @@ Uso:
     eeg-transform eval    [--config config/default.yaml]
     eeg-transform pipeline[--config config/default.yaml] [--force]
     eeg-transform montage [--config config/default.yaml] [--montages 10-20,10-10]
+    eeg-transform experiment-extrapolacion   # sintético, no usa el dataset
 """
 
 from __future__ import annotations
@@ -14,19 +15,27 @@ import argparse
 import sys
 from pathlib import Path
 
-import numpy as np
-
 from .config import load_config, save_config
 from .logging_conf import get_logger, setup_logging
 
 log = get_logger(__name__)
 
-
-def _load_cfg(path: str) -> "EEGTransformConfig":
-    from .config import EEGTransformConfig
-
-    cfg = load_config(path)
-    return cfg
+# Formateadores compartidos de los resúmenes multi-configuración.
+_FMT_MULTI = {
+    "rmse_diag_uV": "{:.3f}".format, "r_diag": "{:.4f}".format,
+    "rmse_cross_uV": "{:.3f}".format, "r_cross": "{:.4f}".format,
+    "ve_cross": "{:.3f}".format,
+    "rmse_ana_cross_uV": "{:.3f}".format,
+    "r_ana_cross": "{:.4f}".format, "ve_ana_cross": "{:.3f}".format,
+}
+_FMT_FIELD = {
+    "rmse_field_diag_uV": "{:.3f}".format,
+    "r_field_diag": "{:.4f}".format,
+    "ve_field_diag": "{:.3f}".format,
+    "rmse_field_cross_uV": "{:.3f}".format,
+    "r_field_cross": "{:.4f}".format,
+    "ve_field_cross": "{:.3f}".format,
+}
 
 
 def cmd_build(cfg) -> None:
@@ -78,12 +87,7 @@ def cmd_eval(cfg) -> None:
         print("Configuraciones balanceadas: "
               + ", ".join(f"{l} ({data.configs[l].n_channels} ch)"
                           for l in data.order))
-        print(summ.to_string(formatters={
-            "rmse_diag_uV": "{:.3f}".format, "r_diag": "{:.4f}".format,
-            "rmse_cross_uV": "{:.3f}".format, "r_cross": "{:.4f}".format,
-            "ve_cross": "{:.3f}".format,
-            "rmse_ana_cross_uV": "{:.3f}".format,
-            "r_ana_cross": "{:.4f}".format, "ve_ana_cross": "{:.3f}".format}))
+        print(summ.to_string(formatters=_FMT_MULTI))
         metrics_df.to_csv(run_dir / "metrics_test.csv", index=False)
 
         history_csv = run_dir / "history.csv"
@@ -101,12 +105,7 @@ def cmd_eval(cfg) -> None:
             wind = metrics.evaluate_multiconfig_windowed(
                 model, data, split="test", window=w, stride=1)
             wsumm = metrics.summarize_multiconfig(wind)
-            print(wsumm.to_string(formatters={
-                "rmse_diag_uV": "{:.3f}".format, "r_diag": "{:.4f}".format,
-                "rmse_cross_uV": "{:.3f}".format, "r_cross": "{:.4f}".format,
-                "ve_cross": "{:.3f}".format,
-                "rmse_ana_cross_uV": "{:.3f}".format,
-                "r_ana_cross": "{:.4f}".format, "ve_ana_cross": "{:.3f}".format}))
+            print(wsumm.to_string(formatters=_FMT_MULTI))
             wind.to_csv(run_dir / "metrics_windowed_test.csv", index=False)
 
         if cfg.model.variant in ("multi_heatmap", "multi_heatmap_v2"):
@@ -114,13 +113,7 @@ def cmd_eval(cfg) -> None:
                 model, data, split="test")
             surf_summ = metrics.summarize_multiconfig_surface(surface_df)
             print("\n======== CAMPO DE SUPERFICIE (TEST) ========")
-            print(surf_summ.to_string(formatters={
-                "rmse_field_diag_uV": "{:.3f}".format,
-                "r_field_diag": "{:.4f}".format,
-                "ve_field_diag": "{:.3f}".format,
-                "rmse_field_cross_uV": "{:.3f}".format,
-                "r_field_cross": "{:.4f}".format,
-                "ve_field_cross": "{:.3f}".format}))
+            print(surf_summ.to_string(formatters=_FMT_FIELD))
             surface_df.to_csv(run_dir / "metrics_surface_test.csv", index=False)
             plots.plot_multiconfig_surface(surface_df, run_dir)
 
@@ -297,6 +290,13 @@ def cmd_montage(cfg, montages: list[str] | None) -> None:
     run_cmd(cfg, montages)
 
 
+def cmd_extrapolacion(cfg=None) -> None:
+    """Experimento sintético de extrapolación a hemisferio ciego."""
+    from .experiments.hemisphere import run_cmd
+
+    run_cmd()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="eeg-transform",
@@ -327,6 +327,11 @@ def main(argv: list[str] | None = None) -> int:
         "--montages", default=None,
         help="Lista separada por comas de montajes (p. ej. 10-20,10-10).",
     )
+    sub.add_parser(
+        "experiment-extrapolacion",
+        help="Experimento sintético: extrapolación de la spline a un "
+             "hemisferio ciego (no usa el dataset real).",
+    )
 
     args = parser.parse_args(argv)
 
@@ -349,6 +354,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.montages else None
         )
         cmd_montage(cfg, montages)
+    elif args.command == "experiment-extrapolacion":
+        cmd_extrapolacion(cfg)
     return 0
 
 

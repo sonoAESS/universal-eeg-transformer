@@ -1,4 +1,4 @@
-# `exp_extrapolacion_hemisferio` — cómo interpolar a un hemisferio ciego
+# `experiment-extrapolacion` — cómo interpolar a un hemisferio ciego
 
 Experimento **sintético y autocontenido** para responder, con números, la
 pregunta de la exploración `topomap_refs`:
@@ -7,6 +7,14 @@ pregunta de la exploración `topomap_refs`:
 > interpolar para "ver" el otro hemisferio usando las diferencias, ¿qué tal
 > sale? ¿Mejora si la interpolación se hace **con el lead field** (física del
 > problema) en lugar de con la spline esférica (geometría pura)?
+
+Ejecución:
+
+```bash
+eeg-transform experiment-extrapolacion   # o: python -m eeg_transform.experiments.hemisphere
+```
+
+(no depende de los datos reales ni de las configuraciones YAML).
 
 ## Diseño
 
@@ -127,18 +135,18 @@ lo medido", que captura la VE ciega de las rutas lead field.
 
 ### La spline queda vetada para cruzar zonas sin sensores
 
-El experimento original ya lo demostraba (sección anterior): extrapolar un
-hemisferio completo con la spline produce VE negativa y amplitudes infladas
-1.3–3×. La solución **física** lo corrige: si se dispone de un modelo
-anatómico del casco, la interpolación-extrapolación debe hacerse por inversión
-del lead field, no por spline. Para el problema gestor (montaje + referencia),
-esto ratifica que el mapa "interior" (hacia nodos cubiertos) lo hacen bien los
-notebooks de `topomap_refs`; el salto a zonas no medidas requiere volver al
-forward.
+Extrapolar un hemisferio completo con la spline produce VE negativa y
+amplitudes infladas 1.3–3×. La solución **física** lo corrige: si se dispone
+de un modelo anatómico del casco, la interpolación-extrapolación debe hacerse
+por inversión del lead field, no por spline. Para el problema gestor (montaje
++ referencia), esto ratifica que el mapa "interior" (hacia nodos cubiertos) lo
+hacen bien los notebooks de `notebooks/exploraciones/topomap_refs`; el salto a
+zonas no medidas requiere volver al forward.
 
 ## Ficheros
 
-* `run.py` — experimento (siembra, escenas, reconstrucción, métricas, figuras).
+* `src/eeg_transform/experiments/hemisphere.py` — experimento (siembra,
+  escenas, reconstrucción, métricas, figuras) con `run_cmd()` para el CLI.
 * `runs/exp_extrapolacion_hemisferio/metricas.csv` — tabla completa
   (order × montaje × lateralidad × ruta × n_components) + `lambda_`/`alpha`/
   `cal_gain` de las mejoras.
